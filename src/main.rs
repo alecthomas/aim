@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 
 use aim::config::{self, CliOverrides, Config, EngineKind, FormatKind};
 use aim::engine::{self, DatabaseEngine};
+use aim::engine::mysql::MysqlEngine;
 use aim::engine::postgres::PostgresEngine;
 use aim::engine::sqlite::SqliteEngine;
 use aim::output::Output;
@@ -17,7 +18,7 @@ struct Cli {
     #[arg(long, global = true, value_parser = EngineKind::parse)]
     engine: Option<EngineKind>,
 
-    /// Migration file format (default: golang-migrate).
+    /// Migration file format (default: migrate).
     #[arg(long, global = true)]
     format: Option<FormatKind>,
 
@@ -90,7 +91,7 @@ fn cmd_init(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let engine = cli.engine.clone().ok_or("--engine is required for init")?;
     let model_str = cli.model.as_deref().ok_or("--model is required for init")?;
-    let format = cli.format.unwrap_or(FormatKind::GolangMigrate);
+    let format = cli.format.unwrap_or(FormatKind::Migrate);
 
     // Validate the model spec early.
     let model = config::ModelSpec::parse(model_str)?;
@@ -114,7 +115,8 @@ fn create_engine(config: &Config) -> Result<Box<dyn DatabaseEngine>, Box<dyn std
     match &config.engine {
         EngineKind::Sqlite => Ok(Box::new(SqliteEngine)),
         EngineKind::Postgres { version } => Ok(Box::new(PostgresEngine::new(version))),
-        EngineKind::Mysql => Err("mysql engine not yet implemented".into()),
+        EngineKind::Mysql { version } => Ok(Box::new(MysqlEngine::new(&format!("mysql:{version}")))),
+        EngineKind::Mariadb { version } => Ok(Box::new(MysqlEngine::new(&format!("mariadb:{version}")))),
     }
 }
 

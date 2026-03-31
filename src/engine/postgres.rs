@@ -53,11 +53,16 @@ impl PostgresEngine {
             .args([
                 "run",
                 "-d",
+                "--tmpfs", "/var/lib/postgresql/data",
                 "-e",
                 &format!("POSTGRES_USER={DB_USER}"),
                 "-e",
                 &format!("POSTGRES_PASSWORD={DB_PASS}"),
+                "-e", "PGDATA=/var/lib/postgresql/data",
                 &image,
+                "-c", "fsync=off",
+                "-c", "synchronous_commit=off",
+                "-c", "full_page_writes=off",
             ])
             .stderr(std::process::Stdio::inherit())
             .output()
@@ -98,7 +103,7 @@ impl PostgresEngine {
         })
         .ok();
 
-        Output::phase("Waiting for postgres to be ready...");
+        Output::phase("Waiting for database to be ready...");
         wait_ready(&id)?;
 
         *guard = Some(id.clone());
@@ -236,6 +241,7 @@ fn wait_ready(container: &str) -> Result<(), Error> {
         }
         thread::sleep(Duration::from_millis(500));
     }
+    super::dump_container_logs(container);
     Err(Error::Connection(
         "postgres container did not become ready within 30s".into(),
     ))

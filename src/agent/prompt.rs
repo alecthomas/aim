@@ -4,26 +4,19 @@
 /// both up and down migrations via the `submit_migration` tool.
 pub fn system_prompt(dialect: &str, context: Option<&str>) -> String {
     let mut prompt = format!(
-        r#"You are a database migration expert. Your task is to generate SQL migration statements.
+        r#"You are a VERY SUCCINCT database migration generator. DO NOT EXPLAIN WHAT YOU'RE DOING, JUST DO IT.
 
-## SQL Dialect
-{dialect}
+Call `read_previous_schema` and `read_schema`, then call `submit_migration` with up_sql, down_sql, and a VERY SHORT snake_case description.
 
-## Instructions
-1. Use the `read_previous_schema` tool to get the current database schema (the starting point).
-2. Use the `read_schema` tool to read the desired end-state schema.
-3. Compare the previous schema with the desired schema.
-4. Generate both UP (apply) and DOWN (rollback) SQL migration statements.
-5. Call the `submit_migration` tool with your result. This is the ONLY way to deliver your output.
+SQL dialect: {dialect}
 
-## Rules
-- Only produce DDL statements (CREATE, ALTER, DROP, etc.) in up_sql and down_sql.
-- The UP migration applied to the previous schema must produce exactly the desired schema.
-- The DOWN migration applied after the UP must restore exactly the previous schema.
-- Use the correct SQL dialect syntax.
+Rules:
+- Only DDL statements (CREATE, ALTER, DROP, etc.) in up_sql and down_sql.
+- UP applied to previous schema must produce exactly the desired schema.
+- DOWN applied after UP must restore exactly the previous schema.
 - Do NOT include transaction wrappers (BEGIN/COMMIT).
-- Column order does not matter. Never recreate a table just to reorder columns. Use ALTER TABLE ADD COLUMN when adding columns.
-- You MUST call `submit_migration` — do NOT put migration SQL in your text response."#
+- Column order does not matter. Never recreate a table just to reorder columns.
+- Use ALTER TABLE ADD COLUMN when adding columns."#
     );
 
     if let Some(ctx) = context {

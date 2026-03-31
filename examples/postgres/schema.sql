@@ -10,7 +10,7 @@ CREATE INDEX idx_users_email ON users (email);
 CREATE TABLE groups (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
-    perms INTEGER NOT NULL
+    perms INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE groups_users (

@@ -2,10 +2,10 @@ use std::path::Path;
 
 use super::{Direction, Error, Migration, MigrationFormat, wrap_sql};
 
-/// golang-migrate format: numbered pairs `000001_desc.up.sql` / `000001_desc.down.sql`.
-pub struct GolangMigrate;
+/// migrate format: numbered pairs `000001_desc.up.sql` / `000001_desc.down.sql`.
+pub struct Migrate;
 
-impl MigrationFormat for GolangMigrate {
+impl MigrationFormat for Migrate {
     fn list(&self, dir: &Path) -> Result<Vec<Migration>, Error> {
         if !dir.exists() {
             return Ok(Vec::new());
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn test_roundtrip_write_and_list() {
         let dir = tempfile::tempdir().expect("create temp dir");
-        let fmt = GolangMigrate;
+        let fmt = Migrate;
         let m = Migration {
             sequence: 1,
             description: "initial".to_owned(),
@@ -150,14 +150,14 @@ mod tests {
     #[test]
     fn test_next_sequence_empty() {
         let dir = tempfile::tempdir().expect("create temp dir");
-        let fmt = GolangMigrate;
+        let fmt = Migrate;
         assert_eq!(fmt.next_sequence(dir.path()).expect("next seq"), 1);
     }
 
     #[test]
     fn test_next_sequence_with_existing() {
         let dir = tempfile::tempdir().expect("create temp dir");
-        let fmt = GolangMigrate;
+        let fmt = Migrate;
         let m = Migration {
             sequence: 3,
             description: "foo".to_owned(),
@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_describe_written() {
-        let fmt = GolangMigrate;
+        let fmt = Migrate;
         let m = Migration {
             sequence: 1,
             description: "initial".to_owned(),

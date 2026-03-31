@@ -1,7 +1,9 @@
+pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
 
 use std::fmt;
+use std::process::Command;
 
 use sqlparser::dialect::Dialect;
 
@@ -27,6 +29,23 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// Fetch and print Docker container logs to stderr for debugging.
+pub fn dump_container_logs(container: &str) {
+    let output = Command::new("docker")
+        .args(["logs", "--tail", "50", container])
+        .output();
+    if let Ok(output) = output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stdout.is_empty() {
+            eprintln!("--- container logs (stdout) ---\n{stdout}");
+        }
+        if !stderr.is_empty() {
+            eprintln!("--- container logs (stderr) ---\n{stderr}");
+        }
+    }
+}
 
 /// Handle to an ephemeral database used for verification.
 ///

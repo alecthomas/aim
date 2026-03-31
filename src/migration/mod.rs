@@ -1,6 +1,6 @@
 pub mod dbmate;
 pub mod flyway;
-pub mod golang_migrate;
+pub mod migrate;
 pub mod goose;
 pub mod refinery;
 pub mod sqitch;

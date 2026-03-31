@@ -39,30 +39,52 @@ impl std::error::Error for Error {
 pub enum EngineKind {
     /// PostgreSQL with a specific Docker image version tag (e.g. "16", "17").
     Postgres { version: String },
-    Mysql,
+    /// MySQL with a specific Docker image version tag (e.g. "8", "9").
+    Mysql { version: String },
+    /// MariaDB with a specific Docker image version tag (e.g. "11", "10").
+    Mariadb { version: String },
     Sqlite,
 }
 
 impl EngineKind {
     /// Parse an engine specifier string.
     ///
-    /// Accepts `"sqlite"`, `"mysql"`, or `"postgres-<version>"`.
+    /// Accepts `"sqlite"`, `"mysql-<version>"`, `"mariadb-<version>"`, or `"postgres-<version>"`.
     pub fn parse(spec: &str) -> Result<Self, String> {
         match spec {
             "sqlite" => Ok(EngineKind::Sqlite),
-            "mysql" => Ok(EngineKind::Mysql),
+            s if s.starts_with("mysql-") => {
+                let version = &s["mysql-".len()..];
+                if version.is_empty() {
+                    return Err("mysql version is required (e.g. mysql-9)".into());
+                }
+                Ok(EngineKind::Mysql {
+                    version: version.to_owned(),
+                })
+            }
+            "mysql" => Err("mysql requires a version (e.g. mysql-9)".into()),
+            s if s.starts_with("mariadb-") => {
+                let version = &s["mariadb-".len()..];
+                if version.is_empty() {
+                    return Err("mariadb version is required (e.g. mariadb-11)".into());
+                }
+                Ok(EngineKind::Mariadb {
+                    version: version.to_owned(),
+                })
+            }
+            "mariadb" => Err("mariadb requires a version (e.g. mariadb-11)".into()),
             s if s.starts_with("postgres-") => {
                 let version = &s["postgres-".len()..];
                 if version.is_empty() {
-                    return Err("postgres version is required (e.g. postgres-16)".into());
+                    return Err("postgres version is required (e.g. postgres-17)".into());
                 }
                 Ok(EngineKind::Postgres {
                     version: version.to_owned(),
                 })
             }
-            "postgres" => Err("postgres requires a version (e.g. postgres-16)".into()),
+            "postgres" => Err("postgres requires a version (e.g. postgres-17)".into()),
             _ => Err(format!(
-                "unknown engine '{spec}'; expected sqlite, mysql, or postgres-<version>"
+                "unknown engine '{spec}'; expected sqlite, mysql-<version>, mariadb-<version>, or postgres-<version>"
             )),
         }
     }
@@ -82,7 +104,7 @@ impl<'de> Deserialize<'de> for EngineKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum FormatKind {
-    GolangMigrate,
+    Migrate,
     Goose,
     Flyway,
     Sqitch,
@@ -94,7 +116,7 @@ pub enum FormatKind {
 impl fmt::Display for FormatKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FormatKind::GolangMigrate => write!(f, "golang-migrate"),
+            FormatKind::Migrate => write!(f, "migrate"),
             FormatKind::Goose => write!(f, "goose"),
             FormatKind::Flyway => write!(f, "flyway"),
             FormatKind::Sqitch => write!(f, "sqitch"),
@@ -109,7 +131,7 @@ impl FormatKind {
     /// Create the corresponding `MigrationFormat` trait object.
     pub fn create(self) -> Box<dyn crate::migration::MigrationFormat> {
         match self {
-            FormatKind::GolangMigrate => Box::new(crate::migration::golang_migrate::GolangMigrate),
+            FormatKind::Migrate => Box::new(crate::migration::migrate::Migrate),
             FormatKind::Goose => Box::new(crate::migration::goose::Goose),
             FormatKind::Flyway => Box::new(crate::migration::flyway::Flyway),
             FormatKind::Sqitch => Box::new(crate::migration::sqitch::Sqitch),
@@ -124,7 +146,8 @@ impl fmt::Display for EngineKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EngineKind::Postgres { version } => write!(f, "postgres-{version}"),
-            EngineKind::Mysql => write!(f, "mysql"),
+            EngineKind::Mysql { version } => write!(f, "mysql-{version}"),
+            EngineKind::Mariadb { version } => write!(f, "mariadb-{version}"),
             EngineKind::Sqlite => write!(f, "sqlite"),
         }
     }
@@ -272,7 +295,7 @@ impl Config {
         let format = overrides
             .format
             .or(file_cfg.format)
-            .unwrap_or(FormatKind::GolangMigrate);
+            .unwrap_or(FormatKind::Migrate);
 
         let schema = overrides
             .schema
@@ -362,11 +385,11 @@ mod tests {
     #[test]
     fn test_default_toml_sqlite() {
         let model = ModelSpec::parse("anthropic-claude-haiku-4-5-20251001").expect("parse");
-        let toml = Config::default_toml(&EngineKind::Sqlite, &model, FormatKind::GolangMigrate);
+        let toml = Config::default_toml(&EngineKind::Sqlite, &model, FormatKind::Migrate);
         assert_eq!(
             toml,
             r#"engine = "sqlite"
-format = "golang-migrate"
+format = "migrate"
 schema = "schema.sql"
 migrations = "migrations"
 max_retries = 3
@@ -381,14 +404,23 @@ model = "anthropic-claude-haiku-4-5-20251001"
         let engine = EngineKind::Postgres {
             version: "16".into(),
         };
-        let toml = Config::default_toml(&engine, &model, FormatKind::GolangMigrate);
+        let toml = Config::default_toml(&engine, &model, FormatKind::Migrate);
         assert!(toml.contains(r#"engine = "postgres-16""#));
     }
 
     #[test]
     fn test_engine_kind_parse() {
         assert_eq!(EngineKind::parse("sqlite").unwrap(), EngineKind::Sqlite);
-        assert_eq!(EngineKind::parse("mysql").unwrap(), EngineKind::Mysql);
+        assert_eq!(
+            EngineKind::parse("mysql-9").unwrap(),
+            EngineKind::Mysql { version: "9".into() }
+        );
+        assert!(EngineKind::parse("mysql").is_err());
+        assert_eq!(
+            EngineKind::parse("mariadb-11").unwrap(),
+            EngineKind::Mariadb { version: "11".into() }
+        );
+        assert!(EngineKind::parse("mariadb").is_err());
         assert_eq!(
             EngineKind::parse("postgres-16").unwrap(),
             EngineKind::Postgres {

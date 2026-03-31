@@ -1,0 +1,9 @@
+engine = "mysql-9"
+schema = "schema.sql"
+migrations = "migrations"
+max_retries = 3
+model = "anthropic-claude-haiku-4-5-20251001"
+# model = "anthropic-claude-opus-4-6"
+# model = "gemini-gemini-3-flash-preview"
+# model = "gemini-gemini-3.1-flash-lite-preview"
+# model = "gemini-gemini-2.5-flash"
