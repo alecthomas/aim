@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+ctrlc = "3.5.2"
 rig-core = "0.33.0"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 schemars = "1"

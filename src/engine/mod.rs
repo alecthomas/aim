@@ -1,6 +1,12 @@
+pub mod postgres;
 pub mod sqlite;
 
 use std::fmt;
+
+use sqlparser::dialect::Dialect;
+
+use crate::diff::text_diff;
+use crate::schema::normalize_ddl;
 
 /// Errors from database engine operations.
 #[derive(Debug)]
@@ -9,8 +15,6 @@ pub enum Error {
     Connection(String),
     /// Failed to execute SQL.
     Execution(String),
-    /// Failed to compute schema diff.
-    Diff(String),
 }
 
 impl fmt::Display for Error {
@@ -18,7 +22,6 @@ impl fmt::Display for Error {
         match self {
             Error::Connection(msg) => write!(f, "engine connection: {msg}"),
             Error::Execution(msg) => write!(f, "engine execution: {msg}"),
-            Error::Diff(msg) => write!(f, "engine diff: {msg}"),
         }
     }
 }
@@ -45,29 +48,19 @@ pub trait DatabaseEngine: Send + Sync {
     /// Execute arbitrary SQL against an ephemeral database.
     fn execute(&self, db: &EphemeralDb, sql: &str) -> Result<(), Error>;
 
-    /// Compare the schemas of two ephemeral databases.
+    /// Dump the raw schema of an ephemeral database as DDL statements
+    /// separated by `;\n\n`.
     ///
-    /// `left_label` and `right_label` describe what each side represents
-    /// (e.g. "schema.sql" vs "migration result") for human-readable output.
-    ///
-    /// Returns an empty string if the schemas match, or a unified diff
-    /// of the differences.
-    fn diff(
-        &self,
-        left: &EphemeralDb,
-        left_label: &str,
-        right: &EphemeralDb,
-        right_label: &str,
-    ) -> Result<String, Error>;
-
-    /// Dump the full schema of an ephemeral database as normalized DDL.
-    ///
-    /// Used to produce a canonical representation of the schema for the LLM,
-    /// ensuring it sees the same form that the diff comparison uses.
+    /// The engine should strip engine-specific noise (e.g. pg_dump preamble,
+    /// `public.` schema qualifiers) but should NOT normalize or sort —
+    /// that is handled by `schema_diff`.
     fn dump_schema(&self, db: &EphemeralDb) -> Result<String, Error>;
 
     /// Tear down an ephemeral database and clean up resources.
     fn drop_ephemeral(&self, db: EphemeralDb) -> Result<(), Error>;
+
+    /// The sqlparser dialect for this engine, used for normalization.
+    fn dialect(&self) -> Box<dyn Dialect>;
 
     /// SQL to prepend to migration files (e.g. disabling FK checks).
     fn migration_prefix(&self) -> &str {
@@ -84,4 +77,40 @@ pub trait DatabaseEngine: Send + Sync {
 
     /// Human-readable description of the SQL dialect for LLM prompts.
     fn dialect_description(&self) -> &str;
+}
+
+/// Normalize a raw schema dump and return a canonical string.
+///
+/// Parses each statement with sqlparser, sorts columns within CREATE TABLE,
+/// strips identifier quoting, and sorts statements alphabetically.
+fn normalize_schema(dialect: &dyn Dialect, raw: &str) -> String {
+    let mut statements: Vec<String> = raw
+        .split(";\n\n")
+        .map(|s| s.trim().trim_end_matches(';').trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| normalize_ddl(dialect, s))
+        .collect();
+    statements.sort();
+    statements.join("\n\n")
+}
+
+/// Compare two raw schema dumps and return a unified diff.
+///
+/// Normalizes both sides (parses, sorts columns, sorts statements) before
+/// comparing. Returns an empty string if the schemas match.
+pub fn schema_diff(
+    dialect: &dyn Dialect,
+    left: &str,
+    left_label: &str,
+    right: &str,
+    right_label: &str,
+) -> String {
+    let left_norm = normalize_schema(dialect, left);
+    let right_norm = normalize_schema(dialect, right);
+
+    if left_norm == right_norm {
+        return String::new();
+    }
+    let diff = text_diff(&left_norm, &right_norm);
+    format!("--- {left_label}\n+++ {right_label}\n{diff}")
 }

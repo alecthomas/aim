@@ -17,7 +17,7 @@ use sqlparser::parser::Parser;
 pub fn normalize_ddl(dialect: &dyn Dialect, sql: &str) -> String {
     let parsed = match Parser::parse_sql(dialect, sql) {
         Ok(stmts) => stmts,
-        Err(_) => return format_statement(sql),
+        Err(_) => return format_unparseable(sql),
     };
 
     let mut normalized = Vec::with_capacity(parsed.len());
@@ -54,6 +54,19 @@ fn strip_quotes_from_name(name: &mut sqlparser::ast::ObjectName) {
             ident.quote_style = None;
         }
     }
+}
+
+/// Format SQL that sqlparser couldn't parse.
+///
+/// Splits on `;` boundaries and formats each statement individually,
+/// so multi-statement strings still get proper separation.
+fn format_unparseable(sql: &str) -> String {
+    let statements: Vec<&str> = sql.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    statements
+        .iter()
+        .map(|s| format_statement(s))
+        .collect::<Vec<_>>()
+        .join(";\n\n")
 }
 
 /// Format a SQL statement with line breaks before major clause keywords.
@@ -191,6 +204,19 @@ mod tests {
         assert!(normalized.contains("\nSELECT "), "SELECT on new line: {normalized}");
         assert!(normalized.contains("\nFROM "), "FROM on new line: {normalized}");
         assert!(normalized.contains("\nJOIN "), "JOIN on new line: {normalized}");
+    }
+
+    #[test]
+    fn test_postgres_multi_statement() {
+        use sqlparser::dialect::PostgreSqlDialect;
+        let pg = PostgreSqlDialect {};
+        let sql = "DROP VIEW IF EXISTS group_members; DROP INDEX CONCURRENTLY IF EXISTS idx_users_email; ALTER TABLE users DROP COLUMN email";
+        let normalized = normalize_ddl(&pg, sql);
+        // Each statement should be on its own line, separated by ;\n\n
+        assert!(
+            normalized.contains(";\n\n"),
+            "expected statement separation, got: {normalized}"
+        );
     }
 
     #[test]

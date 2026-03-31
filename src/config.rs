@@ -35,12 +35,47 @@ impl std::error::Error for Error {
 }
 
 /// Supported database engines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineKind {
-    Postgres,
+    /// PostgreSQL with a specific Docker image version tag (e.g. "16", "17").
+    Postgres { version: String },
     Mysql,
     Sqlite,
+}
+
+impl EngineKind {
+    /// Parse an engine specifier string.
+    ///
+    /// Accepts `"sqlite"`, `"mysql"`, or `"postgres-<version>"`.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        match spec {
+            "sqlite" => Ok(EngineKind::Sqlite),
+            "mysql" => Ok(EngineKind::Mysql),
+            s if s.starts_with("postgres-") => {
+                let version = &s["postgres-".len()..];
+                if version.is_empty() {
+                    return Err("postgres version is required (e.g. postgres-16)".into());
+                }
+                Ok(EngineKind::Postgres {
+                    version: version.to_owned(),
+                })
+            }
+            "postgres" => Err("postgres requires a version (e.g. postgres-16)".into()),
+            _ => Err(format!(
+                "unknown engine '{spec}'; expected sqlite, mysql, or postgres-<version>"
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EngineKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        EngineKind::parse(&s).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Supported migration file formats.
@@ -88,7 +123,7 @@ impl FormatKind {
 impl fmt::Display for EngineKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EngineKind::Postgres => write!(f, "postgres"),
+            EngineKind::Postgres { version } => write!(f, "postgres-{version}"),
             EngineKind::Mysql => write!(f, "mysql"),
             EngineKind::Sqlite => write!(f, "sqlite"),
         }
@@ -266,7 +301,7 @@ impl Config {
     }
 
     /// Generate a default `aim.toml` string.
-    pub fn default_toml(engine: EngineKind, model: &ModelSpec, format: FormatKind) -> String {
+    pub fn default_toml(engine: &EngineKind, model: &ModelSpec, format: FormatKind) -> String {
         format!(
             r#"engine = "{engine}"
 format = "{format}"
@@ -320,9 +355,9 @@ mod tests {
     }
 
     #[test]
-    fn test_default_toml() {
+    fn test_default_toml_sqlite() {
         let model = ModelSpec::parse("anthropic-claude-haiku-4-5-20251001").expect("parse");
-        let toml = Config::default_toml(EngineKind::Sqlite, &model, FormatKind::GolangMigrate);
+        let toml = Config::default_toml(&EngineKind::Sqlite, &model, FormatKind::GolangMigrate);
         assert_eq!(
             toml,
             r#"engine = "sqlite"
@@ -333,6 +368,31 @@ max_retries = 3
 model = "anthropic-claude-haiku-4-5-20251001"
 "#
         );
+    }
+
+    #[test]
+    fn test_default_toml_postgres() {
+        let model = ModelSpec::parse("openai-gpt-4o").expect("parse");
+        let engine = EngineKind::Postgres {
+            version: "16".into(),
+        };
+        let toml = Config::default_toml(&engine, &model, FormatKind::GolangMigrate);
+        assert!(toml.contains(r#"engine = "postgres-16""#));
+    }
+
+    #[test]
+    fn test_engine_kind_parse() {
+        assert_eq!(EngineKind::parse("sqlite").unwrap(), EngineKind::Sqlite);
+        assert_eq!(EngineKind::parse("mysql").unwrap(), EngineKind::Mysql);
+        assert_eq!(
+            EngineKind::parse("postgres-16").unwrap(),
+            EngineKind::Postgres {
+                version: "16".into()
+            }
+        );
+        assert!(EngineKind::parse("postgres").is_err());
+        assert!(EngineKind::parse("postgres-").is_err());
+        assert!(EngineKind::parse("unknown").is_err());
     }
 
     #[test]

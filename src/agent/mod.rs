@@ -9,7 +9,7 @@ use rig::client::{CompletionClient, ProviderClient};
 use rig::completion::Prompt;
 
 use crate::config::ModelSpec;
-use crate::engine::DatabaseEngine;
+use crate::engine::{self, DatabaseEngine};
 use crate::migration::Migration;
 use crate::output::Output;
 
@@ -288,9 +288,10 @@ impl<'a> AgentLoop<'a> {
         self.engine.execute(&db_right, &candidate.up_sql)?;
 
         // Compare up migration result.
-        let up_diff = self
-            .engine
-            .diff(&db_left, "schema.sql", &db_right, "migration result")?;
+        let desired = self.engine.dump_schema(&db_left)?;
+        let after_up = self.engine.dump_schema(&db_right)?;
+        let dialect = self.engine.dialect();
+        let up_diff = engine::schema_diff(dialect.as_ref(), &desired, "schema.sql", &after_up, "migration result");
 
         // Verify down: apply down to db_right, compare with previous state.
         self.engine.execute(&db_right, &candidate.down_sql)?;
@@ -300,9 +301,9 @@ impl<'a> AgentLoop<'a> {
             self.engine.execute(&db_prev, &m.up_sql)?;
         }
 
-        let down_diff = self
-            .engine
-            .diff(&db_prev, "previous state", &db_right, "after rollback")?;
+        let prev_schema = self.engine.dump_schema(&db_prev)?;
+        let after_down = self.engine.dump_schema(&db_right)?;
+        let down_diff = engine::schema_diff(dialect.as_ref(), &prev_schema, "previous state", &after_down, "after rollback");
 
         // Clean up.
         self.engine.drop_ephemeral(db_left)?;

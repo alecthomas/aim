@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
 
 use aim::config::{self, CliOverrides, Config, EngineKind, FormatKind};
-use aim::engine::DatabaseEngine;
+use aim::engine::{self, DatabaseEngine};
+use aim::engine::postgres::PostgresEngine;
 use aim::engine::sqlite::SqliteEngine;
 use aim::output::Output;
 use aim::{agent, display};
@@ -12,8 +13,8 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 
-    /// Database engine (postgres, mysql, sqlite).
-    #[arg(long, global = true)]
+    /// Database engine (sqlite, mysql, postgres-<version>).
+    #[arg(long, global = true, value_parser = EngineKind::parse)]
     engine: Option<EngineKind>,
 
     /// Migration file format (default: golang-migrate).
@@ -50,7 +51,7 @@ enum Command {
 impl Cli {
     fn overrides(&self) -> CliOverrides {
         CliOverrides {
-            engine: self.engine,
+            engine: self.engine.clone(),
             format: self.format,
             schema: self.schema.clone(),
             migrations: self.migrations.clone(),
@@ -61,14 +62,15 @@ impl Cli {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> std::process::ExitCode {
     yansi::whenever(yansi::Condition::TTY_AND_COLOR);
     let cli = Cli::parse();
     let result = run(cli).await;
     if let Err(err) = result {
         eprintln!("error: {err}");
-        std::process::exit(1);
+        return std::process::ExitCode::FAILURE;
     }
+    std::process::ExitCode::SUCCESS
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -86,7 +88,7 @@ fn cmd_init(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let schema_path = cwd.join("schema.sql");
     let migrations_dir = cwd.join("migrations");
 
-    let engine = cli.engine.ok_or("--engine is required for init")?;
+    let engine = cli.engine.clone().ok_or("--engine is required for init")?;
     let model_str = cli.model.as_deref().ok_or("--model is required for init")?;
     let format = cli.format.unwrap_or(FormatKind::GolangMigrate);
 
@@ -97,7 +99,7 @@ fn cmd_init(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Err("aim.toml already exists".into());
     }
 
-    std::fs::write(&config_path, Config::default_toml(engine, &model, format))?;
+    std::fs::write(&config_path, Config::default_toml(&engine, &model, format))?;
     if !schema_path.exists() {
         std::fs::write(&schema_path, "")?;
     }
@@ -109,9 +111,9 @@ fn cmd_init(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Create the appropriate database engine based on config.
 fn create_engine(config: &Config) -> Result<Box<dyn DatabaseEngine>, Box<dyn std::error::Error>> {
-    match config.engine {
+    match &config.engine {
         EngineKind::Sqlite => Ok(Box::new(SqliteEngine)),
-        EngineKind::Postgres => Err("postgres engine not yet implemented".into()),
+        EngineKind::Postgres { version } => Ok(Box::new(PostgresEngine::new(version))),
         EngineKind::Mysql => Err("mysql engine not yet implemented".into()),
     }
 }
@@ -134,10 +136,13 @@ fn cmd_diff(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         engine.execute(&db_current, &m.up_sql)?;
     }
 
-    let diff = engine.diff(&db_current, "migrations", &db_desired, "schema.sql")?;
+    let desired_schema = engine.dump_schema(&db_desired)?;
+    let current_schema = engine.dump_schema(&db_current)?;
 
     engine.drop_ephemeral(db_desired)?;
     engine.drop_ephemeral(db_current)?;
+
+    let diff = engine::schema_diff(engine.dialect().as_ref(), &current_schema, "migrations", &desired_schema, "schema.sql");
 
     if diff.is_empty() {
         Output::success("schema.sql matches current migrations");
