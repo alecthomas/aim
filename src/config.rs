@@ -43,6 +43,48 @@ pub enum EngineKind {
     Sqlite,
 }
 
+/// Supported migration file formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum FormatKind {
+    GolangMigrate,
+    Goose,
+    Flyway,
+    Sqitch,
+    Sqlx,
+    Dbmate,
+    Refinery,
+}
+
+impl fmt::Display for FormatKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FormatKind::GolangMigrate => write!(f, "golang-migrate"),
+            FormatKind::Goose => write!(f, "goose"),
+            FormatKind::Flyway => write!(f, "flyway"),
+            FormatKind::Sqitch => write!(f, "sqitch"),
+            FormatKind::Sqlx => write!(f, "sqlx"),
+            FormatKind::Dbmate => write!(f, "dbmate"),
+            FormatKind::Refinery => write!(f, "refinery"),
+        }
+    }
+}
+
+impl FormatKind {
+    /// Create the corresponding `MigrationFormat` trait object.
+    pub fn create(self) -> Box<dyn crate::migration::MigrationFormat> {
+        match self {
+            FormatKind::GolangMigrate => Box::new(crate::migration::golang_migrate::GolangMigrate),
+            FormatKind::Goose => Box::new(crate::migration::goose::Goose),
+            FormatKind::Flyway => Box::new(crate::migration::flyway::Flyway),
+            FormatKind::Sqitch => Box::new(crate::migration::sqitch::Sqitch),
+            FormatKind::Sqlx => Box::new(crate::migration::sqlx::Sqlx),
+            FormatKind::Dbmate => Box::new(crate::migration::dbmate::Dbmate),
+            FormatKind::Refinery => Box::new(crate::migration::refinery::Refinery),
+        }
+    }
+}
+
 impl fmt::Display for EngineKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -135,6 +177,7 @@ impl fmt::Display for ModelSpec {
 #[derive(Debug, Deserialize)]
 struct FileConfig {
     engine: Option<EngineKind>,
+    format: Option<FormatKind>,
     schema: Option<String>,
     migrations: Option<String>,
     max_retries: Option<usize>,
@@ -146,6 +189,7 @@ struct FileConfig {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub engine: EngineKind,
+    pub format: FormatKind,
     pub schema_path: PathBuf,
     pub migrations_dir: PathBuf,
     pub max_retries: usize,
@@ -156,6 +200,7 @@ pub struct Config {
 #[derive(Debug, Default)]
 pub struct CliOverrides {
     pub engine: Option<EngineKind>,
+    pub format: Option<FormatKind>,
     pub schema: Option<String>,
     pub migrations: Option<String>,
     pub max_retries: Option<usize>,
@@ -172,6 +217,7 @@ impl Config {
         } else {
             FileConfig {
                 engine: None,
+                format: None,
                 schema: None,
                 migrations: None,
                 max_retries: None,
@@ -183,6 +229,11 @@ impl Config {
             .engine
             .or(file_cfg.engine)
             .ok_or_else(|| Error::Validation("engine must be specified".into()))?;
+
+        let format = overrides
+            .format
+            .or(file_cfg.format)
+            .unwrap_or(FormatKind::GolangMigrate);
 
         let schema = overrides
             .schema
@@ -206,6 +257,7 @@ impl Config {
 
         Ok(Config {
             engine,
+            format,
             schema_path,
             migrations_dir,
             max_retries,
@@ -214,9 +266,10 @@ impl Config {
     }
 
     /// Generate a default `aim.toml` string.
-    pub fn default_toml(engine: EngineKind, model: &ModelSpec) -> String {
+    pub fn default_toml(engine: EngineKind, model: &ModelSpec, format: FormatKind) -> String {
         format!(
             r#"engine = "{engine}"
+format = "{format}"
 schema = "schema.sql"
 migrations = "migrations"
 max_retries = 3
@@ -269,10 +322,11 @@ mod tests {
     #[test]
     fn test_default_toml() {
         let model = ModelSpec::parse("anthropic-claude-haiku-4-5-20251001").expect("parse");
-        let toml = Config::default_toml(EngineKind::Sqlite, &model);
+        let toml = Config::default_toml(EngineKind::Sqlite, &model, FormatKind::GolangMigrate);
         assert_eq!(
             toml,
             r#"engine = "sqlite"
+format = "golang-migrate"
 schema = "schema.sql"
 migrations = "migrations"
 max_retries = 3

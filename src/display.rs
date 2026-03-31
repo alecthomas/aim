@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
@@ -5,8 +7,16 @@ use syntect::util::{LinesWithEndings, as_24_bit_terminal_escaped};
 
 /// Print SQL with syntax highlighting to stdout.
 ///
-/// Falls back to plain text if highlighting fails.
+/// Falls back to plain text if stdout is not a TTY or highlighting fails.
 pub fn highlight_sql(sql: &str) {
+    if !std::io::stdout().is_terminal() {
+        print!("{sql}");
+        if !sql.ends_with('\n') {
+            println!();
+        }
+        return;
+    }
+
     let ss = SyntaxSet::load_defaults_newlines();
     let ts = ThemeSet::load_defaults();
 

@@ -1,10 +1,10 @@
 use clap::{Parser, Subcommand};
 
-use aim::config::{self, CliOverrides, Config, EngineKind};
+use aim::config::{self, CliOverrides, Config, EngineKind, FormatKind};
 use aim::engine::DatabaseEngine;
 use aim::engine::sqlite::SqliteEngine;
 use aim::output::Output;
-use aim::{agent, display, migration};
+use aim::{agent, display};
 
 #[derive(Parser)]
 #[command(name = "aim", about = "AI Migrator (AIM) - AI powered database migration generator")]
@@ -15,6 +15,10 @@ struct Cli {
     /// Database engine (postgres, mysql, sqlite).
     #[arg(long, global = true)]
     engine: Option<EngineKind>,
+
+    /// Migration file format (default: golang-migrate).
+    #[arg(long, global = true)]
+    format: Option<FormatKind>,
 
     /// Path to schema file (default: schema.sql).
     #[arg(long, global = true)]
@@ -47,6 +51,7 @@ impl Cli {
     fn overrides(&self) -> CliOverrides {
         CliOverrides {
             engine: self.engine,
+            format: self.format,
             schema: self.schema.clone(),
             migrations: self.migrations.clone(),
             max_retries: self.max_retries,
@@ -57,6 +62,7 @@ impl Cli {
 
 #[tokio::main]
 async fn main() {
+    yansi::whenever(yansi::Condition::TTY_AND_COLOR);
     let cli = Cli::parse();
     let result = run(cli).await;
     if let Err(err) = result {
@@ -82,6 +88,7 @@ fn cmd_init(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let engine = cli.engine.ok_or("--engine is required for init")?;
     let model_str = cli.model.as_deref().ok_or("--model is required for init")?;
+    let format = cli.format.unwrap_or(FormatKind::GolangMigrate);
 
     // Validate the model spec early.
     let model = config::ModelSpec::parse(model_str)?;
@@ -90,7 +97,7 @@ fn cmd_init(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Err("aim.toml already exists".into());
     }
 
-    std::fs::write(&config_path, Config::default_toml(engine, &model))?;
+    std::fs::write(&config_path, Config::default_toml(engine, &model, format))?;
     if !schema_path.exists() {
         std::fs::write(&schema_path, "")?;
     }
@@ -113,8 +120,9 @@ fn cmd_diff(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let config = Config::load(&cwd, cli.overrides())?;
     let engine = create_engine(&config)?;
+    let format = config.format.create();
 
-    let prior = migration::list(&config.migrations_dir)?;
+    let prior = format.list(&config.migrations_dir)?;
 
     // Build normalized schemas via ephemeral DBs.
     let db_desired = engine.create_ephemeral()?;
@@ -144,9 +152,10 @@ async fn cmd_generate(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let config = Config::load(&cwd, cli.overrides())?;
     let engine = create_engine(&config)?;
+    let format = config.format.create();
 
-    let prior = migration::list(&config.migrations_dir)?;
-    let next_seq = migration::next_sequence(&config.migrations_dir)?;
+    let prior = format.list(&config.migrations_dir)?;
+    let next_seq = format.next_sequence(&config.migrations_dir)?;
 
     let agent_loop = agent::AgentLoop::new(
         engine.as_ref(),
@@ -163,7 +172,7 @@ async fn cmd_generate(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let m = &result.migration;
 
     // Write migration files.
-    migration::write(
+    format.write(
         &config.migrations_dir,
         m,
         engine.migration_prefix(),
@@ -173,7 +182,7 @@ async fn cmd_generate(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     use yansi::Paint;
     println!();
     println!("{}", "Generated...".bold());
-    println!("Wrote {:03}_{}.{{up,down}}.sql", m.sequence, m.description);
+    println!("Wrote {}", format.describe_written(m));
     let prefix = engine.migration_prefix();
     let suffix = engine.migration_suffix();
     println!("\n-- UP --");

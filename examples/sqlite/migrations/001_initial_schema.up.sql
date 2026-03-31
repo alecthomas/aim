@@ -1,4 +1,4 @@
-PRAGMA foreign_keys = OFF;
+PRAGMA defer_foreign_keys = true;
 CREATE TABLE users (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -17,4 +17,3 @@ CREATE TABLE groups_users (
   FOREIGN KEY (group_id) REFERENCES groups(id),
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
-PRAGMA foreign_keys = ON;

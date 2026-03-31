@@ -14,7 +14,7 @@ sqlparser = "0.61.0"
 syntect = "5.3.0"
 tokio = { version = "1.50.0", features = ["full"] }
 toml = "1.1.0"
-yansi = "1.0.1"
+yansi = { version = "1.0.1", features = ["detect-tty", "detect-env"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

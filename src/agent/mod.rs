@@ -91,7 +91,7 @@ impl<'a> AgentLoop<'a> {
     ///
     /// `prior_migrations` are the existing migrations that define the previous state.
     /// `next_sequence` is the sequence number for the new migration.
-    pub async fn run(&self, prior_migrations: &[Migration], next_sequence: u32) -> Result<MigrationResult, Error> {
+    pub async fn run(&self, prior_migrations: &[Migration], next_sequence: u64) -> Result<MigrationResult, Error> {
         // Dispatch to the correct provider. Each provider has a different
         // concrete Client type, so we use a macro to avoid duplication.
         macro_rules! run_with_provider {
@@ -138,7 +138,7 @@ impl<'a> AgentLoop<'a> {
         &self,
         client: &C,
         prior_migrations: &[Migration],
-        next_sequence: u32,
+        next_sequence: u64,
     ) -> Result<MigrationResult, Error>
     where
         C: CompletionClient,

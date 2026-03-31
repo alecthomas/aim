@@ -171,11 +171,11 @@ impl DatabaseEngine for SqliteEngine {
     }
 
     fn migration_prefix(&self) -> &str {
-        "PRAGMA foreign_keys = OFF;\n"
+        "PRAGMA defer_foreign_keys = true;\n"
     }
 
     fn migration_suffix(&self) -> &str {
-        "PRAGMA foreign_keys = ON;\n"
+        ""
     }
 
     fn format_sql(&self, sql: &str) -> String {
