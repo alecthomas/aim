@@ -218,6 +218,8 @@ struct FileConfig {
     max_retries: Option<usize>,
     /// Model specifier in `<provider>-<model>` format.
     model: Option<String>,
+    /// Extra context to include in the LLM prompt.
+    context: Option<String>,
 }
 
 /// Resolved configuration used at runtime.
@@ -229,6 +231,7 @@ pub struct Config {
     pub migrations_dir: PathBuf,
     pub max_retries: usize,
     pub model: ModelSpec,
+    pub context: Option<String>,
 }
 
 /// CLI overrides — fields are `Option` so they layer on top of the file config.
@@ -257,6 +260,7 @@ impl Config {
                 migrations: None,
                 max_retries: None,
                 model: None,
+                context: None,
             }
         };
 
@@ -297,6 +301,7 @@ impl Config {
             migrations_dir,
             max_retries,
             model,
+            context: file_cfg.context,
         })
     }
 

@@ -167,6 +167,7 @@ async fn cmd_generate(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         config.schema_path.clone(),
         config.model.clone(),
         config.max_retries,
+        config.context.clone(),
     );
 
     let result = match agent_loop.run(&prior, next_seq).await {

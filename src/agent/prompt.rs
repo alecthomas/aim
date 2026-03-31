@@ -2,8 +2,8 @@
 ///
 /// Includes the SQL dialect description and instructions for producing
 /// both up and down migrations via the `submit_migration` tool.
-pub fn system_prompt(dialect: &str) -> String {
-    format!(
+pub fn system_prompt(dialect: &str, context: Option<&str>) -> String {
+    let mut prompt = format!(
         r#"You are a database migration expert. Your task is to generate SQL migration statements.
 
 ## SQL Dialect
@@ -24,7 +24,14 @@ pub fn system_prompt(dialect: &str) -> String {
 - Do NOT include transaction wrappers (BEGIN/COMMIT).
 - Column order does not matter. Never recreate a table just to reorder columns. Use ALTER TABLE ADD COLUMN when adding columns.
 - You MUST call `submit_migration` — do NOT put migration SQL in your text response."#
-    )
+    );
+
+    if let Some(ctx) = context {
+        prompt.push_str("\n\n## Additional Context\n");
+        prompt.push_str(ctx);
+    }
+
+    prompt
 }
 
 /// Build a retry correction message with the diff feedback.

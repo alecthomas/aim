@@ -75,15 +75,23 @@ pub struct AgentLoop<'a> {
     schema_path: PathBuf,
     model: ModelSpec,
     max_retries: usize,
+    context: Option<String>,
 }
 
 impl<'a> AgentLoop<'a> {
-    pub fn new(engine: &'a dyn DatabaseEngine, schema_path: PathBuf, model: ModelSpec, max_retries: usize) -> Self {
+    pub fn new(
+        engine: &'a dyn DatabaseEngine,
+        schema_path: PathBuf,
+        model: ModelSpec,
+        max_retries: usize,
+        context: Option<String>,
+    ) -> Self {
         Self {
             engine,
             schema_path,
             model,
             max_retries,
+            context,
         }
     }
 
@@ -153,7 +161,10 @@ impl<'a> AgentLoop<'a> {
             return Err(Error::NoChanges);
         }
 
-        let preamble = prompt::system_prompt(self.engine.dialect_description());
+        let preamble = prompt::system_prompt(
+            self.engine.dialect_description(),
+            self.context.as_deref(),
+        );
 
         // Shared slot where the submit_migration tool deposits its result.
         let slot: tools::MigrationSlot = Arc::new(Mutex::new(None));
