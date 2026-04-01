@@ -48,13 +48,7 @@ impl MigrationFormat for Migrate {
         Ok(migrations)
     }
 
-    fn write(
-        &self,
-        dir: &Path,
-        migration: &Migration,
-        prefix: &str,
-        suffix: &str,
-    ) -> Result<(), Error> {
+    fn write(&self, dir: &Path, migration: &Migration, prefix: &str, suffix: &str) -> Result<(), Error> {
         std::fs::create_dir_all(dir)?;
 
         for direction in [Direction::Up, Direction::Down] {
@@ -62,10 +56,7 @@ impl MigrationFormat for Migrate {
                 Direction::Up => &migration.up_sql,
                 Direction::Down => &migration.down_sql,
             };
-            let filename = format!(
-                "{:06}_{}.{direction}.sql",
-                migration.sequence, migration.description
-            );
+            let filename = format!("{:06}_{}.{direction}.sql", migration.sequence, migration.description);
             let path = dir.join(filename);
             std::fs::write(&path, wrap_sql(sql, prefix, suffix))?;
         }
@@ -79,10 +70,7 @@ impl MigrationFormat for Migrate {
     }
 
     fn describe_written(&self, migration: &Migration) -> String {
-        format!(
-            "{:06}_{}.{{up,down}}.sql",
-            migration.sequence, migration.description
-        )
+        format!("{:06}_{}.{{up,down}}.sql", migration.sequence, migration.description)
     }
 }
 

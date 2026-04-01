@@ -119,13 +119,7 @@ fn normalize_schema(dialect: &dyn Dialect, raw: &str) -> String {
 ///
 /// Normalizes both sides (parses, sorts columns, sorts statements) before
 /// comparing. Returns an empty string if the schemas match.
-pub fn schema_diff(
-    dialect: &dyn Dialect,
-    left: &str,
-    left_label: &str,
-    right: &str,
-    right_label: &str,
-) -> String {
+pub fn schema_diff(dialect: &dyn Dialect, left: &str, left_label: &str, right: &str, right_label: &str) -> String {
     let left_norm = normalize_schema(dialect, left);
     let right_norm = normalize_schema(dialect, right);
 

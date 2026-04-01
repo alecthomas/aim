@@ -50,13 +50,7 @@ impl MigrationFormat for Sqlx {
         Ok(migrations)
     }
 
-    fn write(
-        &self,
-        dir: &Path,
-        migration: &Migration,
-        prefix: &str,
-        suffix: &str,
-    ) -> Result<(), Error> {
+    fn write(&self, dir: &Path, migration: &Migration, prefix: &str, suffix: &str) -> Result<(), Error> {
         std::fs::create_dir_all(dir)?;
 
         for direction in [Direction::Up, Direction::Down] {
@@ -64,10 +58,7 @@ impl MigrationFormat for Sqlx {
                 Direction::Up => &migration.up_sql,
                 Direction::Down => &migration.down_sql,
             };
-            let filename = format!(
-                "{}_{}.{direction}.sql",
-                migration.sequence, migration.description
-            );
+            let filename = format!("{}_{}.{direction}.sql", migration.sequence, migration.description);
             std::fs::write(dir.join(filename), wrap_sql(sql, prefix, suffix))?;
         }
 
@@ -82,10 +73,7 @@ impl MigrationFormat for Sqlx {
     }
 
     fn describe_written(&self, migration: &Migration) -> String {
-        format!(
-            "{}_{}.{{up,down}}.sql",
-            migration.sequence, migration.description
-        )
+        format!("{}_{}.{{up,down}}.sql", migration.sequence, migration.description)
     }
 }
 

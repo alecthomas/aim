@@ -161,10 +161,7 @@ impl<'a> AgentLoop<'a> {
             return Err(Error::NoChanges);
         }
 
-        let preamble = prompt::system_prompt(
-            self.engine.dialect_description(),
-            self.context.as_deref(),
-        );
+        let preamble = prompt::system_prompt(self.engine.dialect_description(), self.context.as_deref());
 
         // Shared slot where the submit_migration tool deposits its result.
         let slot: tools::MigrationSlot = Arc::new(Mutex::new(None));
@@ -314,7 +311,13 @@ impl<'a> AgentLoop<'a> {
 
         let prev_schema = self.engine.dump_schema(&db_prev)?;
         let after_down = self.engine.dump_schema(&db_right)?;
-        let down_diff = engine::schema_diff(dialect.as_ref(), &prev_schema, "previous state", &after_down, "after rollback");
+        let down_diff = engine::schema_diff(
+            dialect.as_ref(),
+            &prev_schema,
+            "previous state",
+            &after_down,
+            "after rollback",
+        );
 
         // Clean up.
         self.engine.drop_ephemeral(db_left)?;

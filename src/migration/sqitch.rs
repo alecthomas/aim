@@ -48,13 +48,7 @@ impl MigrationFormat for Sqitch {
         Ok(migrations)
     }
 
-    fn write(
-        &self,
-        dir: &Path,
-        migration: &Migration,
-        prefix: &str,
-        suffix: &str,
-    ) -> Result<(), Error> {
+    fn write(&self, dir: &Path, migration: &Migration, prefix: &str, suffix: &str) -> Result<(), Error> {
         let deploy_dir = dir.join("deploy");
         let revert_dir = dir.join("revert");
         let verify_dir = dir.join("verify");
@@ -116,10 +110,7 @@ fn parse_plan(content: &str) -> Vec<String> {
         })
         .map(|line| {
             // Change name is the first whitespace-delimited token.
-            line.split_whitespace()
-                .next()
-                .unwrap_or(line)
-                .to_owned()
+            line.split_whitespace().next().unwrap_or(line).to_owned()
         })
         .collect()
 }

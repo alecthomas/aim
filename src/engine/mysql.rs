@@ -59,7 +59,8 @@ impl MysqlEngine {
             .args([
                 "run",
                 "-d",
-                "--tmpfs", "/var/lib/mysql",
+                "--tmpfs",
+                "/var/lib/mysql",
                 "-e",
                 &format!("MYSQL_ROOT_PASSWORD={DB_PASS}"),
                 "-e",
@@ -78,9 +79,7 @@ impl MysqlEngine {
 
         let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         if id.is_empty() {
-            return Err(Error::Connection(
-                "docker run returned empty container id".into(),
-            ));
+            return Err(Error::Connection("docker run returned empty container id".into()));
         }
 
         let cleanup_slot = Arc::clone(&self.container);
@@ -110,11 +109,14 @@ impl MysqlEngine {
     fn run_cmd(&self, container: &str, db_name: &str, sql: &str) -> Result<(), Error> {
         let output = Command::new("docker")
             .args([
-                "exec", container, self.client,
+                "exec",
+                container,
+                self.client,
                 &format!("--user={DB_USER}"),
                 &format!("--password={DB_PASS}"),
                 db_name,
-                "-e", sql,
+                "-e",
+                sql,
             ])
             .output()
             .map_err(|e| Error::Execution(format!("running mysql: {e}")))?;
@@ -131,7 +133,10 @@ impl MysqlEngine {
     fn run_exec(&self, container: &str, db_name: &str, sql: &str) -> Result<(), Error> {
         let output = Command::new("docker")
             .args([
-                "exec", "-i", container, self.client,
+                "exec",
+                "-i",
+                container,
+                self.client,
                 &format!("--user={DB_USER}"),
                 &format!("--password={DB_PASS}"),
                 db_name,
@@ -161,13 +166,16 @@ impl MysqlEngine {
     fn run_query(&self, container: &str, db_name: &str, sql: &str) -> Result<String, Error> {
         let output = Command::new("docker")
             .args([
-                "exec", container, self.client,
+                "exec",
+                container,
+                self.client,
                 &format!("--user={DB_USER}"),
                 &format!("--password={DB_PASS}"),
                 "--skip-column-names",
                 "--raw",
                 db_name,
-                "-e", sql,
+                "-e",
+                sql,
             ])
             .output()
             .map_err(|e| Error::Execution(format!("running mysql: {e}")))?;
@@ -257,23 +265,10 @@ impl MysqlEngine {
     }
 
     /// Run `SHOW CREATE <obj_type> <name>` and extract the DDL.
-    fn show_create(
-        &self,
-        container: &str,
-        db_name: &str,
-        obj_type: &str,
-        name: &str,
-    ) -> Result<String, Error> {
-        let raw = self.run_query(
-            container,
-            db_name,
-            &format!("SHOW CREATE {obj_type} `{name}`"),
-        )?;
+    fn show_create(&self, container: &str, db_name: &str, obj_type: &str, name: &str) -> Result<String, Error> {
+        let raw = self.run_query(container, db_name, &format!("SHOW CREATE {obj_type} `{name}`"))?;
         // Output is: name\tDDL (DDL may span multiple lines).
-        let ddl = raw
-            .split_once('\t')
-            .map(|(_, rest)| rest)
-            .unwrap_or(&raw);
+        let ddl = raw.split_once('\t').map(|(_, rest)| rest).unwrap_or(&raw);
         Ok(ddl.trim().to_owned())
     }
 }
@@ -325,10 +320,13 @@ fn wait_ready(container: &str, client: &str) -> Result<(), Error> {
     for _ in 0..60 {
         let output = Command::new("docker")
             .args([
-                "exec", container, client,
+                "exec",
+                container,
+                client,
                 &format!("--user={DB_USER}"),
                 &format!("--password={DB_PASS}"),
-                "-e", "SELECT 1",
+                "-e",
+                "SELECT 1",
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -341,9 +339,7 @@ fn wait_ready(container: &str, client: &str) -> Result<(), Error> {
         thread::sleep(Duration::from_millis(500));
     }
     super::dump_container_logs(container);
-    Err(Error::Connection(
-        "container did not become ready within 30s".into(),
-    ))
+    Err(Error::Connection("container did not become ready within 30s".into()))
 }
 
 impl DatabaseEngine for MysqlEngine {

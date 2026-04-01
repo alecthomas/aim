@@ -42,19 +42,10 @@ impl MigrationFormat for Refinery {
         Ok(migrations)
     }
 
-    fn write(
-        &self,
-        dir: &Path,
-        migration: &Migration,
-        prefix: &str,
-        suffix: &str,
-    ) -> Result<(), Error> {
+    fn write(&self, dir: &Path, migration: &Migration, prefix: &str, suffix: &str) -> Result<(), Error> {
         std::fs::create_dir_all(dir)?;
 
-        let filename = format!(
-            "V{}__{}",
-            migration.sequence, migration.description
-        );
+        let filename = format!("V{}__{}", migration.sequence, migration.description);
         std::fs::write(
             dir.join(format!("{filename}.sql")),
             wrap_sql(&migration.up_sql, prefix, suffix),

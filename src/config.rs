@@ -38,11 +38,17 @@ impl std::error::Error for Error {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineKind {
     /// PostgreSQL with a specific Docker image version tag (e.g. "16", "17").
-    Postgres { version: String },
+    Postgres {
+        version: String,
+    },
     /// MySQL with a specific Docker image version tag (e.g. "8", "9").
-    Mysql { version: String },
+    Mysql {
+        version: String,
+    },
     /// MariaDB with a specific Docker image version tag (e.g. "11", "10").
-    Mariadb { version: String },
+    Mariadb {
+        version: String,
+    },
     Sqlite,
 }
 
@@ -292,10 +298,7 @@ impl Config {
             .or(file_cfg.engine)
             .ok_or_else(|| Error::Validation("engine must be specified".into()))?;
 
-        let format = overrides
-            .format
-            .or(file_cfg.format)
-            .unwrap_or(FormatKind::Migrate);
+        let format = overrides.format.or(file_cfg.format).unwrap_or(FormatKind::Migrate);
 
         let schema = overrides
             .schema
@@ -401,9 +404,7 @@ mod tests {
 
     #[test]
     fn test_default_toml_postgres() {
-        let engine = EngineKind::Postgres {
-            version: "16".into(),
-        };
+        let engine = EngineKind::Postgres { version: "16".into() };
         let toml = Config::default_toml(&engine, None, FormatKind::Migrate);
         assert!(toml.contains(r#"engine = "postgres-16""#));
     }
@@ -423,9 +424,7 @@ mod tests {
         assert!(EngineKind::parse("mariadb").is_err());
         assert_eq!(
             EngineKind::parse("postgres-16").unwrap(),
-            EngineKind::Postgres {
-                version: "16".into()
-            }
+            EngineKind::Postgres { version: "16".into() }
         );
         assert!(EngineKind::parse("postgres").is_err());
         assert!(EngineKind::parse("postgres-").is_err());

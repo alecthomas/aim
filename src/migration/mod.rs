@@ -1,7 +1,7 @@
 pub mod dbmate;
 pub mod flyway;
-pub mod migrate;
 pub mod goose;
+pub mod migrate;
 pub mod refinery;
 pub mod sqitch;
 pub mod sqlx;
@@ -71,13 +71,7 @@ pub trait MigrationFormat: Send + Sync {
     ///
     /// `prefix` and `suffix` are engine-specific SQL to wrap the migration
     /// body (e.g. PRAGMA statements for SQLite).
-    fn write(
-        &self,
-        dir: &Path,
-        migration: &Migration,
-        prefix: &str,
-        suffix: &str,
-    ) -> Result<(), Error>;
+    fn write(&self, dir: &Path, migration: &Migration, prefix: &str, suffix: &str) -> Result<(), Error>;
 
     /// Determine the next sequence number for a new migration.
     fn next_sequence(&self, dir: &Path) -> Result<u64, Error>;

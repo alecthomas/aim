@@ -94,11 +94,7 @@ fn cmd_init(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let engine = cli.engine.clone().ok_or("--engine is required for init")?;
     let format = cli.format.unwrap_or(FormatKind::Migrate);
-    let model = cli
-        .model
-        .as_deref()
-        .map(config::ModelSpec::parse)
-        .transpose()?;
+    let model = cli.model.as_deref().map(config::ModelSpec::parse).transpose()?;
 
     if config_path.exists() {
         return Err("aim.toml already exists".into());

@@ -50,13 +50,7 @@ impl MigrationFormat for Flyway {
         Ok(migrations)
     }
 
-    fn write(
-        &self,
-        dir: &Path,
-        migration: &Migration,
-        prefix: &str,
-        suffix: &str,
-    ) -> Result<(), Error> {
+    fn write(&self, dir: &Path, migration: &Migration, prefix: &str, suffix: &str) -> Result<(), Error> {
         std::fs::create_dir_all(dir)?;
 
         let v_name = format!(

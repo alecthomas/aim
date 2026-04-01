@@ -42,19 +42,10 @@ impl MigrationFormat for Goose {
         Ok(migrations)
     }
 
-    fn write(
-        &self,
-        dir: &Path,
-        migration: &Migration,
-        prefix: &str,
-        suffix: &str,
-    ) -> Result<(), Error> {
+    fn write(&self, dir: &Path, migration: &Migration, prefix: &str, suffix: &str) -> Result<(), Error> {
         std::fs::create_dir_all(dir)?;
 
-        let filename = format!(
-            "{}_{}.sql",
-            migration.sequence, migration.description
-        );
+        let filename = format!("{}_{}.sql", migration.sequence, migration.description);
         let up_body = wrap_sql(&migration.up_sql, prefix, suffix);
         let down_body = wrap_sql(&migration.down_sql, prefix, suffix);
         let content = format!("-- +goose Up\n{up_body}\n-- +goose Down\n{down_body}\n");

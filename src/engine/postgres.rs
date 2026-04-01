@@ -53,16 +53,21 @@ impl PostgresEngine {
             .args([
                 "run",
                 "-d",
-                "--tmpfs", "/var/lib/postgresql/data",
+                "--tmpfs",
+                "/var/lib/postgresql/data",
                 "-e",
                 &format!("POSTGRES_USER={DB_USER}"),
                 "-e",
                 &format!("POSTGRES_PASSWORD={DB_PASS}"),
-                "-e", "PGDATA=/var/lib/postgresql/data",
+                "-e",
+                "PGDATA=/var/lib/postgresql/data",
                 &image,
-                "-c", "fsync=off",
-                "-c", "synchronous_commit=off",
-                "-c", "full_page_writes=off",
+                "-c",
+                "fsync=off",
+                "-c",
+                "synchronous_commit=off",
+                "-c",
+                "full_page_writes=off",
             ])
             .stderr(std::process::Stdio::inherit())
             .output()
@@ -74,9 +79,7 @@ impl PostgresEngine {
 
         let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         if id.is_empty() {
-            return Err(Error::Connection(
-                "docker run returned empty container id".into(),
-            ));
+            return Err(Error::Connection("docker run returned empty container id".into()));
         }
 
         // Install a ctrlc handler that stops the container on SIGINT/SIGTERM.
@@ -114,8 +117,18 @@ impl PostgresEngine {
     fn psql_cmd(container: &str, db_name: &str, sql: &str) -> Result<(), Error> {
         let output = Command::new("docker")
             .args([
-                "exec", container, "psql", "-U", DB_USER, "-d", db_name, "-v",
-                "ON_ERROR_STOP=1", "--no-psqlrc", "-c", sql,
+                "exec",
+                container,
+                "psql",
+                "-U",
+                DB_USER,
+                "-d",
+                db_name,
+                "-v",
+                "ON_ERROR_STOP=1",
+                "--no-psqlrc",
+                "-c",
+                sql,
             ])
             .output()
             .map_err(|e| Error::Execution(format!("running psql: {e}")))?;
@@ -132,8 +145,17 @@ impl PostgresEngine {
     fn psql_exec(container: &str, db_name: &str, sql: &str) -> Result<(), Error> {
         let output = Command::new("docker")
             .args([
-                "exec", "-i", container, "psql", "-U", DB_USER, "-d", db_name, "-v",
-                "ON_ERROR_STOP=1", "--no-psqlrc",
+                "exec",
+                "-i",
+                container,
+                "psql",
+                "-U",
+                DB_USER,
+                "-d",
+                db_name,
+                "-v",
+                "ON_ERROR_STOP=1",
+                "--no-psqlrc",
             ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -160,8 +182,17 @@ impl PostgresEngine {
     fn pg_dump(container: &str, db_name: &str) -> Result<String, Error> {
         let output = Command::new("docker")
             .args([
-                "exec", container, "pg_dump", "-U", DB_USER, "-d", db_name,
-                "--schema-only", "--no-owner", "--no-privileges", "--no-comments",
+                "exec",
+                container,
+                "pg_dump",
+                "-U",
+                DB_USER,
+                "-d",
+                db_name,
+                "--schema-only",
+                "--no-owner",
+                "--no-privileges",
+                "--no-comments",
                 "--no-tablespaces",
             ])
             .output()
@@ -205,11 +236,7 @@ impl PostgresEngine {
             parts.push(current);
         }
 
-        parts
-            .iter()
-            .map(|s| s.trim())
-            .collect::<Vec<_>>()
-            .join(";\n\n")
+        parts.iter().map(|s| s.trim()).collect::<Vec<_>>().join(";\n\n")
     }
 }
 
@@ -230,9 +257,7 @@ impl Drop for PostgresEngine {
 fn wait_ready(container: &str) -> Result<(), Error> {
     for _ in 0..60 {
         let output = Command::new("docker")
-            .args([
-                "exec", container, "pg_isready", "-U", DB_USER,
-            ])
+            .args(["exec", container, "pg_isready", "-U", DB_USER])
             .output()
             .map_err(|e| Error::Connection(format!("checking readiness: {e}")))?;
 
