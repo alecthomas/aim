@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-REPO="alecthomas/proctor"
-BINARY="proctor"
+REPO="alecthomas/aim"
+BINARY="aim"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
 get_latest_version() {
