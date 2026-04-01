@@ -65,7 +65,9 @@ AIM's verification loop means the model doesn't need to be powerful — it just 
 
 - `anthropic-claude-haiku-4-5-20251001`
 - `gemini-gemini-3.1-flash-lite-preview`
-- `groq-openai/gpt-oss-20b` — very fast via Groq's optimized inference
+- `openai/gpt-oss-20b` — very fast via Groq's optimized inference
+- `openrouter-openai/gpt-oss-safeguard-20b`
+- `openrouter-moonshotai/kimi-k2-instruct`
 - `deepseek-deepseek-chat`
 
 Larger models like `anthropic-claude-sonnet-4-6` or `openai-gpt-4o` also work but are overkill for most migrations.
