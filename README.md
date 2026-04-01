@@ -61,15 +61,23 @@ If `model` is set in `aim.toml`, the `--model` flag can be omitted from `generat
 
 ## Model selection
 
-AIM's verification loop means the model doesn't need to be powerful — it just needs to produce valid DDL, and AIM will catch and retry mistakes. Small, fast, cheap models work well:
+AIM's verification loop means the model doesn't need to be powerful — it just needs to produce valid DDL, and AIM will catch and retry mistakes. Small, fast, cheap models work well.
+
+Proprietary models:
 
 - `anthropic-claude-haiku-4-5-20251001`
 - `gemini-gemini-3.1-flash-lite-preview`
-- `openai/gpt-oss-20b` — very fast via Groq's optimized inference
-- `openrouter-openai/gpt-oss-safeguard-20b`
-- `openrouter-moonshotai/kimi-k2-instruct`
+- `gemini-gemini-3-flash-preview`
+- `gemini-gemini-3.1-flash-lite-preview`
+- `gemini-gemini-2.5-flash`
+
+Open source models:
+
+- `groq-openai/gpt-oss-20b`
+- `groq-openai/gpt-oss-safeguard-20b`
+- `groq-moonshotai/kimi-k2-instruct`
+- `openrouter-z-ai/glm-5-turbo`
 - `deepseek-deepseek-chat`
-- `z-ai/glm-5-turbo`
 
 Larger models like `anthropic-claude-sonnet-4-6` or `openai-gpt-4o` also work but are overkill for most migrations.
 
