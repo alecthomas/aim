@@ -253,7 +253,7 @@ pub struct Config {
     pub schema_path: PathBuf,
     pub migrations_dir: PathBuf,
     pub max_retries: usize,
-    pub model: ModelSpec,
+    pub model: Option<ModelSpec>,
     pub context: Option<String>,
 }
 
@@ -311,11 +311,10 @@ impl Config {
 
         let max_retries = overrides.max_retries.or(file_cfg.max_retries).unwrap_or(3);
 
-        let model_str = overrides
-            .model
-            .or(file_cfg.model)
-            .unwrap_or_else(|| "openai-gpt-4o".into());
-        let model = ModelSpec::parse(&model_str)?;
+        let model = match overrides.model.or(file_cfg.model) {
+            Some(s) => Some(ModelSpec::parse(&s)?),
+            None => None,
+        };
 
         Ok(Config {
             engine,
@@ -329,16 +328,19 @@ impl Config {
     }
 
     /// Generate a default `aim.toml` string.
-    pub fn default_toml(engine: &EngineKind, model: &ModelSpec, format: FormatKind) -> String {
-        format!(
+    pub fn default_toml(engine: &EngineKind, model: Option<&ModelSpec>, format: FormatKind) -> String {
+        let mut toml = format!(
             r#"engine = "{engine}"
 format = "{format}"
 schema = "schema.sql"
 migrations = "migrations"
 max_retries = 3
-model = "{model}"
 "#
-        )
+        );
+        if let Some(model) = model {
+            toml.push_str(&format!("model = \"{model}\"\n"));
+        }
+        toml
     }
 }
 
@@ -383,28 +385,26 @@ mod tests {
     }
 
     #[test]
-    fn test_default_toml_sqlite() {
+    fn test_default_toml_with_model() {
         let model = ModelSpec::parse("anthropic-claude-haiku-4-5-20251001").expect("parse");
-        let toml = Config::default_toml(&EngineKind::Sqlite, &model, FormatKind::Migrate);
-        assert_eq!(
-            toml,
-            r#"engine = "sqlite"
-format = "migrate"
-schema = "schema.sql"
-migrations = "migrations"
-max_retries = 3
-model = "anthropic-claude-haiku-4-5-20251001"
-"#
-        );
+        let toml = Config::default_toml(&EngineKind::Sqlite, Some(&model), FormatKind::Migrate);
+        assert!(toml.contains(r#"engine = "sqlite""#));
+        assert!(toml.contains(r#"model = "anthropic-claude-haiku-4-5-20251001""#));
+    }
+
+    #[test]
+    fn test_default_toml_without_model() {
+        let toml = Config::default_toml(&EngineKind::Sqlite, None, FormatKind::Migrate);
+        assert!(toml.contains(r#"engine = "sqlite""#));
+        assert!(!toml.contains("model"));
     }
 
     #[test]
     fn test_default_toml_postgres() {
-        let model = ModelSpec::parse("openai-gpt-4o").expect("parse");
         let engine = EngineKind::Postgres {
             version: "16".into(),
         };
-        let toml = Config::default_toml(&engine, &model, FormatKind::Migrate);
+        let toml = Config::default_toml(&engine, None, FormatKind::Migrate);
         assert!(toml.contains(r#"engine = "postgres-16""#));
     }
 

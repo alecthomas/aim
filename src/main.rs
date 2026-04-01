@@ -1,15 +1,18 @@
 use clap::{Parser, Subcommand};
 
 use aim::config::{self, CliOverrides, Config, EngineKind, FormatKind};
-use aim::engine::{self, DatabaseEngine};
 use aim::engine::mysql::MysqlEngine;
 use aim::engine::postgres::PostgresEngine;
 use aim::engine::sqlite::SqliteEngine;
+use aim::engine::{self, DatabaseEngine};
 use aim::output::Output;
 use aim::{agent, display};
 
 #[derive(Parser)]
-#[command(name = "aim", about = "AI Migrator (AIM) - AI powered database migration generator")]
+#[command(
+    name = "aim",
+    about = "AI Migrator (AIM) - verifiable AI powered SQL migration generator"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -90,23 +93,28 @@ fn cmd_init(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let migrations_dir = cwd.join("migrations");
 
     let engine = cli.engine.clone().ok_or("--engine is required for init")?;
-    let model_str = cli.model.as_deref().ok_or("--model is required for init")?;
     let format = cli.format.unwrap_or(FormatKind::Migrate);
-
-    // Validate the model spec early.
-    let model = config::ModelSpec::parse(model_str)?;
+    let model = cli
+        .model
+        .as_deref()
+        .map(config::ModelSpec::parse)
+        .transpose()?;
 
     if config_path.exists() {
         return Err("aim.toml already exists".into());
     }
 
-    std::fs::write(&config_path, Config::default_toml(&engine, &model, format))?;
+    std::fs::write(&config_path, Config::default_toml(&engine, model.as_ref(), format))?;
     if !schema_path.exists() {
         std::fs::write(&schema_path, "")?;
     }
     std::fs::create_dir_all(&migrations_dir)?;
 
-    println!("Initialized aim project with {engine} engine and {model} model");
+    if let Some(model) = &model {
+        println!("Initialized aim project with {engine} engine and {model} model");
+    } else {
+        println!("Initialized aim project with {engine} engine");
+    }
     Ok(())
 }
 
@@ -144,9 +152,25 @@ fn cmd_diff(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     engine.drop_ephemeral(db_desired)?;
     engine.drop_ephemeral(db_current)?;
 
-    let migrations_label = config.migrations_dir.strip_prefix(&cwd).unwrap_or(&config.migrations_dir).display().to_string();
-    let schema_label = config.schema_path.strip_prefix(&cwd).unwrap_or(&config.schema_path).display().to_string();
-    let diff = engine::schema_diff(engine.dialect().as_ref(), &current_schema, &migrations_label, &desired_schema, &schema_label);
+    let migrations_label = config
+        .migrations_dir
+        .strip_prefix(&cwd)
+        .unwrap_or(&config.migrations_dir)
+        .display()
+        .to_string();
+    let schema_label = config
+        .schema_path
+        .strip_prefix(&cwd)
+        .unwrap_or(&config.schema_path)
+        .display()
+        .to_string();
+    let diff = engine::schema_diff(
+        engine.dialect().as_ref(),
+        &current_schema,
+        &migrations_label,
+        &desired_schema,
+        &schema_label,
+    );
 
     if diff.is_empty() {
         Output::success("schema.sql matches current migrations");
@@ -166,10 +190,14 @@ async fn cmd_generate(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let prior = format.list(&config.migrations_dir)?;
     let next_seq = format.next_sequence(&config.migrations_dir)?;
 
+    let model = config
+        .model
+        .ok_or("--model is required for generate (set in aim.toml or pass --model)")?;
+
     let agent_loop = agent::AgentLoop::new(
         engine.as_ref(),
         config.schema_path.clone(),
-        config.model.clone(),
+        model,
         config.max_retries,
         config.context.clone(),
     );
