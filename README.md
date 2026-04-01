@@ -69,6 +69,7 @@ AIM's verification loop means the model doesn't need to be powerful — it just 
 - `openrouter-openai/gpt-oss-safeguard-20b`
 - `openrouter-moonshotai/kimi-k2-instruct`
 - `deepseek-deepseek-chat`
+- `z-ai/glm-5-turbo`
 
 Larger models like `anthropic-claude-sonnet-4-6` or `openai-gpt-4o` also work but are overkill for most migrations.
 
