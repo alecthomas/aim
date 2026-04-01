@@ -1,60 +1,30 @@
+use similar::{ChangeTag, TextDiff};
+
 /// Produce a unified-style text diff between two strings.
 ///
 /// Returns an empty string if `left` and `right` are identical.
-/// Used to give the LLM feedback on schema mismatches during retry.
+/// Shows 2 lines of context around each change.
 pub fn text_diff(left: &str, right: &str) -> String {
-    let left_lines: Vec<&str> = left.lines().collect();
-    let right_lines: Vec<&str> = right.lines().collect();
-
-    if left_lines == right_lines {
+    if left == right {
         return String::new();
     }
 
-    // Simple line-by-line diff using longest common subsequence.
-    let lcs = lcs_table(&left_lines, &right_lines);
+    let diff = TextDiff::from_lines(left, right);
     let mut output = Vec::new();
-    build_diff(
-        &lcs,
-        &left_lines,
-        &right_lines,
-        left_lines.len(),
-        right_lines.len(),
-        &mut output,
-    );
 
-    output.join("\n")
-}
-
-/// Build the LCS length table.
-fn lcs_table(left: &[&str], right: &[&str]) -> Vec<Vec<usize>> {
-    let m = left.len();
-    let n = right.len();
-    let mut table = vec![vec![0usize; n + 1]; m + 1];
-
-    for i in 1..=m {
-        for j in 1..=n {
-            table[i][j] = if left[i - 1] == right[j - 1] {
-                table[i - 1][j - 1] + 1
-            } else {
-                table[i - 1][j].max(table[i][j - 1])
+    for hunk in diff.unified_diff().context_radius(2).iter_hunks() {
+        for change in hunk.iter_changes() {
+            let prefix = match change.tag() {
+                ChangeTag::Equal => "  ",
+                ChangeTag::Delete => "- ",
+                ChangeTag::Insert => "+ ",
             };
+            // change.value() includes trailing newline; strip it.
+            output.push(format!("{prefix}{}", change.value().trim_end_matches('\n')));
         }
     }
-    table
-}
 
-/// Walk the LCS table to produce diff lines.
-fn build_diff(table: &[Vec<usize>], left: &[&str], right: &[&str], i: usize, j: usize, output: &mut Vec<String>) {
-    if i > 0 && j > 0 && left[i - 1] == right[j - 1] {
-        build_diff(table, left, right, i - 1, j - 1, output);
-        output.push(format!("  {}", left[i - 1]));
-    } else if j > 0 && (i == 0 || table[i][j - 1] >= table[i - 1][j]) {
-        build_diff(table, left, right, i, j - 1, output);
-        output.push(format!("+ {}", right[j - 1]));
-    } else if i > 0 {
-        build_diff(table, left, right, i - 1, j, output);
-        output.push(format!("- {}", left[i - 1]));
-    }
+    output.join("\n")
 }
 
 #[cfg(test)]
@@ -83,5 +53,17 @@ mod tests {
         let result = text_diff("a\nb\nc", "a\nB\nc");
         assert!(result.contains("- b"), "got: {result}");
         assert!(result.contains("+ B"), "got: {result}");
+    }
+
+    #[test]
+    fn test_context_collapse() {
+        let left = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10";
+        let right = "1\n2\n3\n4\nFIVE\n6\n7\n8\n9\n10";
+        let result = text_diff(left, right);
+        assert!(result.contains("- 5"), "got: {result}");
+        assert!(result.contains("+ FIVE"), "got: {result}");
+        // Lines far from the change should not appear.
+        assert!(!result.contains("  1"), "should not contain line 1: {result}");
+        assert!(!result.contains("  10"), "should not contain line 10: {result}");
     }
 }

@@ -110,7 +110,9 @@ fn normalize_schema(dialect: &dyn Dialect, raw: &str) -> String {
         .map(|s| normalize_ddl(dialect, s))
         .collect();
     statements.sort();
-    statements.join("\n\n")
+    let mut result = statements.join("\n\n");
+    result.push('\n');
+    result
 }
 
 /// Compare two raw schema dumps and return a unified diff.

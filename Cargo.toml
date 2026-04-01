@@ -11,6 +11,7 @@ rusqlite = { version = "0.39.0", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+similar = "2.7.0"
 sqlparser = "0.61.0"
 syntect = "5.3.0"
 tokio = { version = "1.50.0", features = ["full"] }

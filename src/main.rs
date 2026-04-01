@@ -144,7 +144,9 @@ fn cmd_diff(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     engine.drop_ephemeral(db_desired)?;
     engine.drop_ephemeral(db_current)?;
 
-    let diff = engine::schema_diff(engine.dialect().as_ref(), &current_schema, "migrations", &desired_schema, "schema.sql");
+    let migrations_label = config.migrations_dir.strip_prefix(&cwd).unwrap_or(&config.migrations_dir).display().to_string();
+    let schema_label = config.schema_path.strip_prefix(&cwd).unwrap_or(&config.schema_path).display().to_string();
+    let diff = engine::schema_diff(engine.dialect().as_ref(), &current_schema, &migrations_label, &desired_schema, &schema_label);
 
     if diff.is_empty() {
         Output::success("schema.sql matches current migrations");
