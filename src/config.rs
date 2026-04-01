@@ -272,6 +272,7 @@ pub struct CliOverrides {
     pub migrations: Option<String>,
     pub max_retries: Option<usize>,
     pub model: Option<String>,
+    pub context: Option<String>,
 }
 
 impl Config {
@@ -326,7 +327,7 @@ impl Config {
             migrations_dir,
             max_retries,
             model,
-            context: file_cfg.context,
+            context: overrides.context.or(file_cfg.context),
         })
     }
 

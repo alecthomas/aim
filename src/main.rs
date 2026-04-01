@@ -40,6 +40,10 @@ struct Cli {
     /// LLM model in <provider>-<model> format (e.g. anthropic-claude-haiku-4-5-20251001).
     #[arg(long, global = true)]
     model: Option<String>,
+
+    /// Extra context to include in the LLM prompt.
+    #[arg(long, global = true)]
+    context: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -61,6 +65,7 @@ impl Cli {
             migrations: self.migrations.clone(),
             max_retries: self.max_retries,
             model: self.model.clone(),
+            context: self.context.clone(),
         }
     }
 }
