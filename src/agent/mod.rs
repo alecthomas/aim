@@ -200,9 +200,26 @@ impl<'a> AgentLoop<'a> {
             let (up_diff, down_diff) = match self.verify(&candidate, prior_migrations) {
                 Ok(result) => result,
                 Err(Error::Engine(e)) => {
-                    let msg = format!("execution error: {e}");
+                    let msg = format!("{e}");
                     Output::error(&msg);
-                    (msg.clone(), msg)
+
+                    if attempt > self.max_retries {
+                        Output::error("verification failed after all retries");
+                        return Err(Error::VerificationFailed {
+                            attempts: attempt,
+                            last_up_diff: msg.clone(),
+                            last_down_diff: msg,
+                        });
+                    }
+
+                    Output::retry(attempt, self.max_retries);
+                    let retry_prompt = format!(
+                        "Your migration SQL was invalid:\n\n```\n{msg}\n```\n\n\
+                         Fix the SQL and call `submit_migration` again."
+                    );
+                    prompt_agent(&agent, &retry_prompt, &slot).await?;
+                    candidate = take_slot(&slot)?;
+                    continue;
                 }
                 Err(e) => return Err(e),
             };

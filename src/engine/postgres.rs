@@ -316,6 +316,7 @@ impl DatabaseEngine for PostgresEngine {
          ALTER TABLE supports ADD COLUMN, DROP COLUMN, ALTER COLUMN (SET/DROP NOT NULL, \
          SET DATA TYPE, SET DEFAULT, DROP DEFAULT), and RENAME COLUMN. \
          Use CREATE INDEX CONCURRENTLY for production-safe index creation. \
+         Do NOT schema-qualify index names (CREATE INDEX CONCURRENTLY idx_name, not CREATE INDEX CONCURRENTLY public.idx_name). \
          Do NOT include transaction wrappers (BEGIN/COMMIT). \
          Prefer IF EXISTS / IF NOT EXISTS where appropriate."
     }
