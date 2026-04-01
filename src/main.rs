@@ -53,7 +53,11 @@ enum Command {
     /// Show the diff between schema.sql and the current migrations.
     Diff,
     /// Generate, verify, and write a migration.
-    Generate,
+    Generate {
+        /// Generate and verify but don't write migration files.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 impl Cli {
@@ -86,7 +90,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Init => cmd_init(&cli)?,
         Command::Diff => cmd_diff(&cli)?,
-        Command::Generate => cmd_generate(&cli).await?,
+        Command::Generate { dry_run } => cmd_generate(&cli, dry_run).await?,
     }
     Ok(())
 }
@@ -182,7 +186,7 @@ fn cmd_diff(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn cmd_generate(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_generate(cli: &Cli, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let config = Config::load(&cwd, cli.overrides())?;
     let engine = create_engine(&config)?;
@@ -217,7 +221,9 @@ async fn cmd_generate(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Output::success("schema.sql matches current migrations, nothing to generate");
         return Ok(());
     }
+    Output::phase("Schema changes:");
     Output::diff("schema", &diff);
+    println!();
 
     let next_seq = format.next_sequence(&config.migrations_dir)?;
 
@@ -240,18 +246,23 @@ async fn cmd_generate(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let m = &result.migration;
 
-    // Write migration files.
-    format.write(
-        &config.migrations_dir,
-        m,
-        engine.migration_prefix(),
-        engine.migration_suffix(),
-    )?;
-
     use yansi::Paint;
-    println!();
-    println!("{}", "Generated...".bold());
-    println!("Wrote {}", format.describe_written(m));
+
+    if dry_run {
+        println!();
+        println!("{}", "Dry run — not writing files.".bold());
+    } else {
+        format.write(
+            &config.migrations_dir,
+            m,
+            engine.migration_prefix(),
+            engine.migration_suffix(),
+        )?;
+
+        println!();
+        println!("{}", "Generated...".bold());
+        println!("Wrote {}", format.describe_written(m));
+    }
     let prefix = engine.migration_prefix();
     let suffix = engine.migration_suffix();
     println!("\n-- UP --");
