@@ -189,6 +189,36 @@ async fn cmd_generate(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let format = config.format.create();
 
     let prior = format.list(&config.migrations_dir)?;
+
+    // Check if a migration is needed before invoking the LLM.
+    let db_desired = engine.create_ephemeral()?;
+    let schema_sql = std::fs::read_to_string(&config.schema_path)?;
+    engine.execute(&db_desired, &schema_sql)?;
+
+    let db_current = engine.create_ephemeral()?;
+    for m in &prior {
+        engine.execute(&db_current, &m.up_sql)?;
+    }
+
+    let desired_schema = engine.dump_schema(&db_desired)?;
+    let current_schema = engine.dump_schema(&db_current)?;
+
+    engine.drop_ephemeral(db_desired)?;
+    engine.drop_ephemeral(db_current)?;
+
+    let diff = engine::schema_diff(
+        engine.dialect().as_ref(),
+        &current_schema,
+        "migrations",
+        &desired_schema,
+        "schema.sql",
+    );
+    if diff.is_empty() {
+        Output::success("schema.sql matches current migrations, nothing to generate");
+        return Ok(());
+    }
+    Output::diff("schema", &diff);
+
     let next_seq = format.next_sequence(&config.migrations_dir)?;
 
     let model = config
