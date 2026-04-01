@@ -20,10 +20,13 @@ cargo install aim
 
 ## How it works
 
-1. You maintain a `schema.sql` file describing your desired database schema.
-2. `aim generate` asks an LLM to produce UP and DOWN migrations that transform the current state (from existing migrations) into the desired state.
-3. AIM verifies the migration by replaying it against an ephemeral database and comparing the result with `schema.sql`. If verification fails, it retries with diff feedback.
-4. Once verified, the migration files are written to disk.
+You maintain a single `schema.sql` describing your desired database schema. AIM figures out how to get there.
+
+1. **Snapshot** — AIM creates two ephemeral databases: one by loading `schema.sql` (the desired state), and one by replaying all existing migrations (the current state). It dumps a stable, normalized DDL representation from each.
+2. **Diff** — AIM compares the two DDL snapshots to determine what changed.
+3. **Generate** — An LLM reads both schemas and produces UP and DOWN SQL migration statements.
+4. **Verify** — AIM applies the generated UP migration to a fresh ephemeral database and checks that the result exactly matches `schema.sql`. It then applies DOWN and checks that the original state is restored. If either check fails, AIM feeds the diff back to the LLM and retries.
+5. **Write** — Once verified, the migration files are written to disk in your chosen format.
 
 ## Supported databases
 

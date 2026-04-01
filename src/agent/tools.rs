@@ -123,7 +123,10 @@ impl Tool for SubmitMigration {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let mut slot = self.slot.lock().map_err(|e| ToolError(format!("lock poisoned: {e}")))?;
+        if slot.is_some() {
+            return Err(ToolError("Migration already submitted. Stop.".into()));
+        }
         *slot = Some(args);
-        Ok("Migration submitted successfully.".into())
+        Ok("Migration submitted. Task complete, stop.".into())
     }
 }
