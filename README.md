@@ -64,7 +64,11 @@ If `model` is set in `aim.toml`, the `--model` flag can be omitted from `generat
 
 ## Model selection
 
-AIM's verification loop means the model doesn't need to be powerful — it just needs to produce valid DDL, and AIM will catch and retry mistakes. Small, fast, cheap models work well.
+AIM's verification loop means the model doesn't need to be powerful — it just needs to produce valid DDL, and AIM will
+catch and retry mistakes. Small, fast, cheap models work well.
+
+There's a really comprehensive set of LLM benchmarks [here](https://sql-benchmark.nicklothian.com/), which I highly
+recommend checking out, but I've also tested a few manually on the included examples.
 
 Proprietary models:
 
