@@ -38,6 +38,10 @@ struct Cli {
     #[arg(long, global = true)]
     max_retries: Option<usize>,
 
+    /// Maximum output tokens for LLM responses (increase for large schemas).
+    #[arg(long, global = true)]
+    max_tokens: Option<u64>,
+
     /// LLM model in <provider>-<model> format (e.g. anthropic-claude-haiku-4-5-20251001).
     #[arg(long, global = true)]
     model: Option<String>,
@@ -74,6 +78,7 @@ impl Cli {
             schema: self.schema.clone(),
             migrations: self.migrations.clone(),
             max_retries: self.max_retries,
+            max_tokens: self.max_tokens,
             model: self.model.clone(),
             context: self.context.clone(),
         }
@@ -130,6 +135,7 @@ fn cmd_init(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let engine = cli.engine.clone().ok_or("--engine is required for init")?;
     let format = cli.format.unwrap_or(FormatKind::Migrate);
     let model = cli.model.as_deref().map(config::ModelSpec::parse).transpose()?;
+    let max_tokens = cli.max_tokens.unwrap_or(16384);
 
     if config_path.exists() {
         return Err("aim.toml already exists".into());
@@ -137,7 +143,7 @@ fn cmd_init(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::write(
         &config_path,
-        Config::default_toml(&engine, model.as_ref(), format, schema, migrations),
+        Config::default_toml(&engine, model.as_ref(), format, schema, migrations, max_tokens),
     )?;
     if !schema_path.exists() {
         std::fs::write(&schema_path, "")?;
@@ -265,6 +271,7 @@ async fn cmd_generate(cli: &Cli, dry_run: bool) -> Result<(), Box<dyn std::error
         config.schema_path.clone(),
         model,
         config.max_retries,
+        config.max_tokens,
         config.context.clone(),
     );
 

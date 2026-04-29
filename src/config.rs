@@ -245,6 +245,7 @@ struct FileConfig {
     schema: Option<String>,
     migrations: Option<String>,
     max_retries: Option<usize>,
+    max_tokens: Option<u64>,
     /// Model specifier in `<provider>-<model>` format.
     model: Option<String>,
     /// Extra context to include in the LLM prompt.
@@ -259,6 +260,7 @@ pub struct Config {
     pub schema_path: PathBuf,
     pub migrations_dir: PathBuf,
     pub max_retries: usize,
+    pub max_tokens: u64,
     pub model: Option<ModelSpec>,
     pub context: Option<String>,
 }
@@ -271,6 +273,7 @@ pub struct CliOverrides {
     pub schema: Option<String>,
     pub migrations: Option<String>,
     pub max_retries: Option<usize>,
+    pub max_tokens: Option<u64>,
     pub model: Option<String>,
     pub context: Option<String>,
 }
@@ -289,6 +292,7 @@ impl Config {
                 schema: None,
                 migrations: None,
                 max_retries: None,
+                max_tokens: None,
                 model: None,
                 context: None,
             }
@@ -314,6 +318,7 @@ impl Config {
         let migrations_dir = project_root.join(migrations);
 
         let max_retries = overrides.max_retries.or(file_cfg.max_retries).unwrap_or(3);
+        let max_tokens = overrides.max_tokens.or(file_cfg.max_tokens).unwrap_or(16384);
 
         let model = match overrides.model.or(file_cfg.model) {
             Some(s) => Some(ModelSpec::parse(&s)?),
@@ -326,6 +331,7 @@ impl Config {
             schema_path,
             migrations_dir,
             max_retries,
+            max_tokens,
             model,
             context: overrides.context.or(file_cfg.context),
         })
@@ -338,6 +344,7 @@ impl Config {
         format: FormatKind,
         schema: &str,
         migrations: &str,
+        max_tokens: u64,
     ) -> String {
         let mut toml = format!(
             r#"engine = "{engine}"
@@ -345,6 +352,7 @@ format = "{format}"
 schema = "{schema}"
 migrations = "{migrations}"
 max_retries = 3
+max_tokens = {max_tokens}
 "#
         );
         if let Some(model) = model {
@@ -403,6 +411,7 @@ mod tests {
             FormatKind::Migrate,
             "schema.sql",
             "migrations",
+            16384,
         );
         assert!(toml.contains(r#"engine = "sqlite""#));
         assert!(toml.contains(r#"model = "anthropic-claude-haiku-4-5-20251001""#));
@@ -416,6 +425,7 @@ mod tests {
             FormatKind::Migrate,
             "schema.sql",
             "migrations",
+            16384,
         );
         assert!(toml.contains(r#"engine = "sqlite""#));
         assert!(!toml.contains("model"));
@@ -424,7 +434,7 @@ mod tests {
     #[test]
     fn test_default_toml_postgres() {
         let engine = EngineKind::Postgres { version: "16".into() };
-        let toml = Config::default_toml(&engine, None, FormatKind::Migrate, "schema.sql", "migrations");
+        let toml = Config::default_toml(&engine, None, FormatKind::Migrate, "schema.sql", "migrations", 16384);
         assert!(toml.contains(r#"engine = "postgres-16""#));
     }
 
@@ -436,6 +446,7 @@ mod tests {
             FormatKind::Migrate,
             "./internal/db/schema/schema.sql",
             "./internal/db/schema/migrations",
+            16384,
         );
         assert!(toml.contains(r#"schema = "./internal/db/schema/schema.sql""#));
         assert!(toml.contains(r#"migrations = "./internal/db/schema/migrations""#));

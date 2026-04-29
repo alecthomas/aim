@@ -76,6 +76,7 @@ pub struct AgentLoop<'a> {
     schema_path: PathBuf,
     model: ModelSpec,
     max_retries: usize,
+    max_tokens: u64,
     context: Option<String>,
 }
 
@@ -85,6 +86,7 @@ impl<'a> AgentLoop<'a> {
         schema_path: PathBuf,
         model: ModelSpec,
         max_retries: usize,
+        max_tokens: u64,
         context: Option<String>,
     ) -> Self {
         Self {
@@ -92,6 +94,7 @@ impl<'a> AgentLoop<'a> {
             schema_path,
             model,
             max_retries,
+            max_tokens,
             context,
         }
     }
@@ -190,7 +193,7 @@ impl<'a> AgentLoop<'a> {
         let agent = client
             .agent(&self.model.model)
             .preamble(&preamble)
-            .max_tokens(4096)
+            .max_tokens(self.max_tokens)
             .default_max_turns(10)
             .hook(Output)
             .tool(tools::ReadPreviousSchema {
@@ -206,7 +209,7 @@ impl<'a> AgentLoop<'a> {
              existing migrations, then call the submit_migration tool with your result.";
 
         // First attempt.
-        prompt_agent(&agent, initial_prompt, &slot).await?;
+        prompt_agent(&agent, initial_prompt, &slot, self.max_tokens).await?;
         let mut candidate = take_slot(&slot)?;
 
         // Verify + retry loop.
@@ -236,7 +239,7 @@ impl<'a> AgentLoop<'a> {
                         "Your migration SQL was invalid:\n\n```\n{msg}\n```\n\n\
                          Fix the SQL and call `submit_migration` again."
                     );
-                    prompt_agent(&agent, &retry_prompt, &slot).await?;
+                    prompt_agent(&agent, &retry_prompt, &slot, self.max_tokens).await?;
                     candidate = take_slot(&slot)?;
                     continue;
                 }
@@ -276,7 +279,7 @@ impl<'a> AgentLoop<'a> {
 
             // Retry: include diff feedback in a new prompt.
             let retry_prompt = prompt::retry_message(&up_diff, &down_diff);
-            prompt_agent(&agent, &retry_prompt, &slot).await?;
+            prompt_agent(&agent, &retry_prompt, &slot, self.max_tokens).await?;
             candidate = take_slot(&slot)?;
         }
 
@@ -377,14 +380,34 @@ fn take_slot(slot: &tools::MigrationSlot) -> Result<MigrationOutput, Error> {
 /// Prompt the agent and handle providers that return empty responses after
 /// tool calls (e.g. Gemini). If the LLM already called submit_migration
 /// before the error, we have what we need and can ignore the error.
-async fn prompt_agent(agent: &impl Prompt, prompt: &str, slot: &tools::MigrationSlot) -> Result<(), Error> {
+async fn prompt_agent(
+    agent: &impl Prompt,
+    prompt: &str,
+    slot: &tools::MigrationSlot,
+    max_tokens: u64,
+) -> Result<(), Error> {
     let result: Result<String, _> = agent.prompt(prompt).await;
-    if let Err(e) = result {
-        // Check if the tool was called before the error.
-        let has_result = slot.lock().map(|s| s.is_some()).unwrap_or(false);
-        if !has_result {
-            return Err(Error::Llm(format!("{e}")));
+    match result {
+        Ok(_) => {
+            // If the LLM responded with text but never called submit_migration,
+            // check if this is possibly a truncation issue (handled by take_slot later).
+            Ok(())
+        }
+        Err(e) => {
+            // Check if the tool was called before the error.
+            let has_result = slot.lock().map(|s| s.is_some()).unwrap_or(false);
+            if has_result {
+                return Ok(());
+            }
+
+            let msg = format!("{e}");
+            if msg.contains("missing field") && msg.contains("JsonError") {
+                return Err(Error::Llm(format!(
+                    "LLM output was truncated (max_tokens = {max_tokens}). \
+                     Increase max_tokens in aim.toml or pass --max-tokens on the CLI."
+                )));
+            }
+            Err(Error::Llm(msg))
         }
     }
-    Ok(())
 }
