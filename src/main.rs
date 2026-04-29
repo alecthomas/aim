@@ -56,7 +56,11 @@ enum Command {
     /// Create config, schema.sql, and migrations directory.
     Init,
     /// Show the diff between schema.sql and the current migrations.
-    Diff,
+    Diff {
+        /// Exit with non-zero status if schema differs from migrations.
+        #[arg(long)]
+        exit_code: bool,
+    },
     /// Generate, verify, and write a migration.
     Generate {
         /// Generate and verify but don't write migration files.
@@ -102,7 +106,7 @@ async fn main() -> std::process::ExitCode {
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Init => cmd_init(&cli)?,
-        Command::Diff => cmd_diff(&cli)?,
+        Command::Diff { exit_code } => cmd_diff(&cli, exit_code)?,
         Command::Generate { dry_run } => cmd_generate(&cli, dry_run).await?,
         Command::Validate => cmd_validate(&cli)?,
         Command::Auth { ref provider } => cmd_auth(&cli, provider.clone())?,
@@ -171,7 +175,7 @@ fn create_engine(config: &Config) -> Result<Box<dyn DatabaseEngine>, Box<dyn std
     }
 }
 
-fn cmd_diff(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_diff(cli: &Cli, exit_code: bool) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let config = Config::load(&cwd, cli.overrides())?;
     let engine = create_engine(&config)?;
@@ -219,6 +223,9 @@ fn cmd_diff(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Output::success("schema.sql matches current migrations");
     } else {
         Output::diff("schema", &diff);
+        if exit_code {
+            return Err("schema.sql differs from current migrations".into());
+        }
     }
 
     Ok(())
