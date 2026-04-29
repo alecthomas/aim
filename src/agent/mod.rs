@@ -14,7 +14,8 @@ use crate::auth;
 use crate::config::ModelSpec;
 use crate::engine::{self, DatabaseEngine};
 use crate::migration::Migration;
-use crate::output::Output;
+use crate::output::{Output, Spinner};
+use crate::schema;
 
 use tools::MigrationOutput;
 
@@ -190,6 +191,9 @@ impl<'a> AgentLoop<'a> {
         // Shared slot where the submit_migration tool deposits its result.
         let slot: tools::MigrationSlot = Arc::new(Mutex::new(None));
 
+        let dialect = self.engine.dialect();
+        let expected_table_count = schema::table_names(dialect.as_ref(), &previous_ddl).len();
+
         Output::phase("Generating migration...");
 
         let agent = client
@@ -204,7 +208,10 @@ impl<'a> AgentLoop<'a> {
             .tool(tools::ReadSchema {
                 desired_ddl: desired_ddl.clone(),
             })
-            .tool(tools::SubmitMigration { slot: slot.clone() })
+            .tool(tools::SubmitMigration {
+                slot: slot.clone(),
+                expected_table_count,
+            })
             .build();
 
         let initial_prompt = "Generate the migration. Use the tools to read the schema and \
@@ -222,6 +229,38 @@ impl<'a> AgentLoop<'a> {
         for attempt in 1..=self.max_retries + 1 {
             println!();
             Output::phase("Verifying migration...");
+
+            let seed_issues = validate_seed_coverage(dialect.as_ref(), &previous_ddl, &candidate);
+            if !seed_issues.is_empty() {
+                let msg = format!(
+                    "Seed data validation failed:\n{}",
+                    seed_issues
+                        .iter()
+                        .map(|i| format!("- {i}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+                Output::error(&msg);
+
+                if attempt > self.max_retries {
+                    Output::error("verification failed after all retries");
+                    return Err(Error::VerificationFailed {
+                        attempts: attempt,
+                        last_up_diff: msg.clone(),
+                        last_down_diff: msg,
+                    });
+                }
+
+                Output::retry(attempt, self.max_retries);
+                let retry_prompt = format!(
+                    "Your seed data is incomplete or invalid:\n{msg}\n\n\
+                     Fix the seed_data and call `submit_migration` again."
+                );
+                prompt_agent(&agent, &retry_prompt, &mut history, &slot, self.max_tokens).await?;
+                candidate = take_slot(&slot)?;
+                continue;
+            }
+            Output::success("seed data covers all tables");
 
             // Verification can fail with an engine error (e.g. invalid SQL).
             // Treat that as a retryable failure, not a fatal error.
@@ -377,6 +416,48 @@ impl<'a> AgentLoop<'a> {
     }
 }
 
+/// Validate that seed data covers every table in the previous schema.
+///
+/// Returns a list of issues, or an empty vec if all tables are covered
+/// with valid seed data. Checks that:
+/// - every table in the previous DDL has a `seed_data` entry
+/// - each entry has at least 2 rows
+/// - `expected_after_up` and `expected_after_down` have matching row counts
+fn validate_seed_coverage(
+    dialect: &dyn sqlparser::dialect::Dialect,
+    previous_ddl: &str,
+    candidate: &MigrationOutput,
+) -> Vec<String> {
+    let tables = schema::table_names(dialect, previous_ddl);
+    let mut issues = Vec::new();
+
+    for table in &tables {
+        match candidate.seed_data.get(table) {
+            None => issues.push(format!("missing seed data for table `{table}`")),
+            Some(seed) => {
+                let row_count = seed.rows.len();
+                if row_count < 2 {
+                    issues.push(format!("table `{table}`: need at least 2 seed rows, got {row_count}"));
+                }
+                if seed.expected_after_up.len() != row_count {
+                    issues.push(format!(
+                        "table `{table}`: expected_after_up has {} rows but rows has {row_count}",
+                        seed.expected_after_up.len()
+                    ));
+                }
+                if seed.expected_after_down.len() != row_count {
+                    issues.push(format!(
+                        "table `{table}`: expected_after_down has {} rows but rows has {row_count}",
+                        seed.expected_after_down.len()
+                    ));
+                }
+            }
+        }
+    }
+
+    issues
+}
+
 /// Extract the migration output from the shared slot, clearing it for reuse.
 fn take_slot(slot: &tools::MigrationSlot) -> Result<MigrationOutput, Error> {
     let mut guard = slot
@@ -399,7 +480,12 @@ async fn prompt_agent<M: CompletionModel>(
     slot: &tools::MigrationSlot,
     max_tokens: u64,
 ) -> Result<(), Error> {
+    if !history.is_empty() {
+        Output::history_size(history);
+    }
+    let spinner = Spinner::start();
     let result: Result<String, _> = agent.prompt(prompt).with_history(history).await;
+    spinner.stop();
     match result {
         Ok(_) => {
             // If the LLM responded with text but never called submit_migration,
@@ -422,5 +508,106 @@ async fn prompt_agent<M: CompletionModel>(
             }
             Err(Error::Llm(msg))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tools::TableSeedData;
+
+    fn two_rows() -> Vec<tools::Row> {
+        vec![
+            HashMap::from([
+                ("id".into(), serde_json::json!(1)),
+                ("name".into(), serde_json::json!("a")),
+            ]),
+            HashMap::from([
+                ("id".into(), serde_json::json!(2)),
+                ("name".into(), serde_json::json!("b")),
+            ]),
+        ]
+    }
+
+    fn make_seed(rows: Vec<tools::Row>) -> TableSeedData {
+        TableSeedData {
+            expected_after_up: rows.clone(),
+            expected_after_down: rows.clone(),
+            rows,
+        }
+    }
+
+    fn make_candidate(seed_data: HashMap<String, TableSeedData>) -> MigrationOutput {
+        MigrationOutput {
+            up_sql: String::new(),
+            down_sql: String::new(),
+            description: "test".into(),
+            seed_data,
+        }
+    }
+
+    #[test]
+    fn test_validate_seed_coverage_all_tables_covered() {
+        let ddl = "CREATE TABLE users (id INTEGER, name TEXT);\n\nCREATE TABLE groups (id INTEGER)";
+        let dialect = sqlparser::dialect::SQLiteDialect {};
+        let candidate = make_candidate(HashMap::from([
+            ("users".into(), make_seed(two_rows())),
+            (
+                "groups".into(),
+                make_seed(vec![
+                    HashMap::from([("id".into(), serde_json::json!(1))]),
+                    HashMap::from([("id".into(), serde_json::json!(2))]),
+                ]),
+            ),
+        ]));
+        let issues = validate_seed_coverage(&dialect, ddl, &candidate);
+        assert!(issues.is_empty(), "expected no issues, got: {issues:?}");
+    }
+
+    #[test]
+    fn test_validate_seed_coverage_missing_table() {
+        let ddl = "CREATE TABLE users (id INTEGER);\n\nCREATE TABLE groups (id INTEGER)";
+        let dialect = sqlparser::dialect::SQLiteDialect {};
+        let candidate = make_candidate(HashMap::from([("users".into(), make_seed(two_rows()))]));
+        let issues = validate_seed_coverage(&dialect, ddl, &candidate);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("groups"), "should mention groups: {}", issues[0]);
+    }
+
+    #[test]
+    fn test_validate_seed_coverage_too_few_rows() {
+        let ddl = "CREATE TABLE users (id INTEGER)";
+        let dialect = sqlparser::dialect::SQLiteDialect {};
+        let one_row = vec![HashMap::from([("id".into(), serde_json::json!(1))])];
+        let candidate = make_candidate(HashMap::from([("users".into(), make_seed(one_row))]));
+        let issues = validate_seed_coverage(&dialect, ddl, &candidate);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("at least 2"), "{}", issues[0]);
+    }
+
+    #[test]
+    fn test_validate_seed_coverage_row_count_mismatch() {
+        let ddl = "CREATE TABLE users (id INTEGER)";
+        let dialect = sqlparser::dialect::SQLiteDialect {};
+        let candidate = make_candidate(HashMap::from([(
+            "users".into(),
+            TableSeedData {
+                rows: two_rows(),
+                expected_after_up: vec![HashMap::from([("id".into(), serde_json::json!(1))])],
+                expected_after_down: two_rows(),
+            },
+        )]));
+        let issues = validate_seed_coverage(&dialect, ddl, &candidate);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("expected_after_up"), "{}", issues[0]);
+    }
+
+    #[test]
+    fn test_validate_seed_coverage_empty_ddl() {
+        let dialect = sqlparser::dialect::SQLiteDialect {};
+        let candidate = make_candidate(HashMap::new());
+        let issues = validate_seed_coverage(&dialect, "", &candidate);
+        assert!(issues.is_empty());
     }
 }

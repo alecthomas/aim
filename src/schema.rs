@@ -56,6 +56,42 @@ fn strip_quotes_from_name(name: &mut sqlparser::ast::ObjectName) {
     }
 }
 
+/// Extract table names from a DDL dump.
+///
+/// Parses each statement (separated by `;` + blank line) and collects
+/// the unquoted name of every `CREATE TABLE` found. Returns names in
+/// the order they appear.
+pub fn table_names(dialect: &dyn Dialect, ddl: &str) -> Vec<String> {
+    let statements: Vec<&str> = ddl
+        .split(";\n\n")
+        .map(|s| s.trim().trim_end_matches(';').trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut names = Vec::new();
+    for sql in statements {
+        if let Ok(parsed) = Parser::parse_sql(dialect, sql) {
+            for stmt in parsed {
+                if let Statement::CreateTable(ct) = stmt {
+                    let name = ct
+                        .name
+                        .0
+                        .iter()
+                        .filter_map(|part| match part {
+                            ObjectNamePart::Identifier(ident) => Some(ident.value.clone()),
+                            ObjectNamePart::Function(_) => None,
+                        })
+                        .next_back();
+                    if let Some(n) = name {
+                        names.push(n);
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
 /// Format SQL that sqlparser couldn't parse.
 ///
 /// Splits on `;` boundaries and formats each statement individually,
@@ -217,6 +253,43 @@ mod tests {
             normalized.contains(";\n\n"),
             "expected statement separation, got: {normalized}"
         );
+    }
+
+    #[test]
+    fn test_table_names_basic() {
+        let ddl =
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);\n\nCREATE TABLE groups (id INTEGER PRIMARY KEY)";
+        let names = table_names(&sqlite(), ddl);
+        assert_eq!(names, vec!["users", "groups"]);
+    }
+
+    #[test]
+    fn test_table_names_ignores_views_and_indexes() {
+        let ddl = "CREATE TABLE users (id INTEGER PRIMARY KEY);\n\nCREATE INDEX idx ON users (id);\n\nCREATE VIEW v AS SELECT * FROM users";
+        let names = table_names(&sqlite(), ddl);
+        assert_eq!(names, vec!["users"]);
+    }
+
+    #[test]
+    fn test_table_names_strips_quotes() {
+        let ddl = r#"CREATE TABLE "groups" (id INTEGER PRIMARY KEY)"#;
+        let names = table_names(&sqlite(), ddl);
+        assert_eq!(names, vec!["groups"]);
+    }
+
+    #[test]
+    fn test_table_names_empty_ddl() {
+        let names = table_names(&sqlite(), "");
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn test_table_names_postgres_schema_qualified() {
+        use sqlparser::dialect::PostgreSqlDialect;
+        let pg = PostgreSqlDialect {};
+        let ddl = "CREATE TABLE public.users (id SERIAL PRIMARY KEY)";
+        let names = table_names(&pg, ddl);
+        assert_eq!(names, vec!["users"]);
     }
 
     #[test]
