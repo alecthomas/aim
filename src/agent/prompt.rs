@@ -4,7 +4,7 @@
 /// both up and down migrations via the `submit_migration` tool.
 pub fn system_prompt(dialect: &str, context: Option<&str>) -> String {
     let mut prompt = format!(
-        r#"You are a VERY SUCCINCT database migration generator. DO NOT EXPLAIN WHAT YOU'RE DOING, JUST DO IT.
+        r#"You are a database migration generator. Explain what you're doing as you think about what you're doing.
 
 Call `read_previous_schema` and `read_schema`, then call `submit_migration` with up_sql, down_sql, and a VERY SHORT snake_case description.
 
@@ -27,9 +27,18 @@ Rules:
     prompt
 }
 
-/// Build a retry correction message with the diff feedback.
-pub fn retry_message(up_diff: &str, down_diff: &str) -> String {
-    let mut msg = "Your previous migration was incorrect. Here are the diffs:\n\n".to_string();
+/// Build a retry correction message with the diff feedback and the
+/// candidate SQL so the LLM can see exactly what it produced.
+pub fn retry_message(up_diff: &str, down_diff: &str, up_sql: &str, down_sql: &str) -> String {
+    let mut msg = "Your previous migration was incorrect.\n\n".to_string();
+
+    msg.push_str("## Your UP SQL\n```sql\n");
+    msg.push_str(up_sql);
+    msg.push_str("\n```\n\n");
+
+    msg.push_str("## Your DOWN SQL\n```sql\n");
+    msg.push_str(down_sql);
+    msg.push_str("\n```\n\n");
 
     if !up_diff.is_empty() {
         msg.push_str("## UP migration diff (expected vs actual):\n```\n");

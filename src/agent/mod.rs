@@ -5,8 +5,10 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use rig::agent::Agent;
 use rig::client::{CompletionClient, ProviderClient};
-use rig::completion::Prompt;
+use rig::completion::{CompletionModel, Prompt};
+use rig::message::Message;
 
 use crate::auth;
 use crate::config::ModelSpec;
@@ -208,8 +210,12 @@ impl<'a> AgentLoop<'a> {
         let initial_prompt = "Generate the migration. Use the tools to read the schema and \
              existing migrations, then call the submit_migration tool with your result.";
 
+        // Chat history persists across retries so the LLM can see its
+        // prior attempts, the schemas it read, and the error feedback.
+        let mut history: Vec<Message> = Vec::new();
+
         // First attempt.
-        prompt_agent(&agent, initial_prompt, &slot, self.max_tokens).await?;
+        prompt_agent(&agent, initial_prompt, &mut history, &slot, self.max_tokens).await?;
         let mut candidate = take_slot(&slot)?;
 
         // Verify + retry loop.
@@ -236,10 +242,14 @@ impl<'a> AgentLoop<'a> {
 
                     Output::retry(attempt, self.max_retries);
                     let retry_prompt = format!(
-                        "Your migration SQL was invalid:\n\n```\n{msg}\n```\n\n\
-                         Fix the SQL and call `submit_migration` again."
+                        "Your migration SQL failed during verification.\n\n\
+                         ## Error\n```\n{msg}\n```\n\n\
+                         ## Your UP SQL\n```sql\n{}\n```\n\n\
+                         ## Your DOWN SQL\n```sql\n{}\n```\n\n\
+                         Fix the SQL and call `submit_migration` again.",
+                        candidate.up_sql, candidate.down_sql
                     );
-                    prompt_agent(&agent, &retry_prompt, &slot, self.max_tokens).await?;
+                    prompt_agent(&agent, &retry_prompt, &mut history, &slot, self.max_tokens).await?;
                     candidate = take_slot(&slot)?;
                     continue;
                 }
@@ -278,8 +288,8 @@ impl<'a> AgentLoop<'a> {
             Output::retry(attempt, self.max_retries);
 
             // Retry: include diff feedback in a new prompt.
-            let retry_prompt = prompt::retry_message(&up_diff, &down_diff);
-            prompt_agent(&agent, &retry_prompt, &slot, self.max_tokens).await?;
+            let retry_prompt = prompt::retry_message(&up_diff, &down_diff, &candidate.up_sql, &candidate.down_sql);
+            prompt_agent(&agent, &retry_prompt, &mut history, &slot, self.max_tokens).await?;
             candidate = take_slot(&slot)?;
         }
 
@@ -377,16 +387,19 @@ fn take_slot(slot: &tools::MigrationSlot) -> Result<MigrationOutput, Error> {
         .ok_or_else(|| Error::Llm("LLM did not call submit_migration tool".into()))
 }
 
-/// Prompt the agent and handle providers that return empty responses after
-/// tool calls (e.g. Gemini). If the LLM already called submit_migration
-/// before the error, we have what we need and can ignore the error.
-async fn prompt_agent(
-    agent: &impl Prompt,
+/// Prompt the agent, preserving conversation history across calls.
+///
+/// Uses `.with_history()` so the LLM sees prior tool calls, schemas,
+/// and submitted migrations when retrying. Also handles providers that
+/// return empty responses after tool calls (e.g. Gemini).
+async fn prompt_agent<M: CompletionModel>(
+    agent: &Agent<M, Output>,
     prompt: &str,
+    history: &mut Vec<Message>,
     slot: &tools::MigrationSlot,
     max_tokens: u64,
 ) -> Result<(), Error> {
-    let result: Result<String, _> = agent.prompt(prompt).await;
+    let result: Result<String, _> = agent.prompt(prompt).with_history(history).await;
     match result {
         Ok(_) => {
             // If the LLM responded with text but never called submit_migration,
