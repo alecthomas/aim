@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod auth;
 pub mod config;
 #[allow(dead_code)]
 pub mod diff;

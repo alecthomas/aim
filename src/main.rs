@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 
+use aim::auth;
 use aim::config::{self, CliOverrides, Config, EngineKind, FormatKind};
 use aim::engine::mysql::MysqlEngine;
 use aim::engine::postgres::PostgresEngine;
@@ -58,6 +59,11 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Configure API key for an LLM provider.
+    Auth {
+        /// Provider name (e.g. anthropic, openai). Inferred from aim.toml if omitted.
+        provider: Option<String>,
+    },
 }
 
 impl Cli {
@@ -91,7 +97,24 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Init => cmd_init(&cli)?,
         Command::Diff => cmd_diff(&cli)?,
         Command::Generate { dry_run } => cmd_generate(&cli, dry_run).await?,
+        Command::Auth { ref provider } => cmd_auth(&cli, provider.clone())?,
     }
+    Ok(())
+}
+
+fn cmd_auth(cli: &Cli, provider: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let provider = match provider {
+        Some(p) => p,
+        None => {
+            let cwd = std::env::current_dir()?;
+            let config = Config::load(&cwd, cli.overrides());
+            config
+                .ok()
+                .and_then(|c| c.model.map(|m| m.provider.to_owned()))
+                .ok_or("provider is required (pass it as an argument or set model in aim.toml)")?
+        }
+    };
+    auth::login_interactive(&provider)?;
     Ok(())
 }
 

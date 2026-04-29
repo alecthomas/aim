@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use rig::client::{CompletionClient, ProviderClient};
 use rig::completion::Prompt;
 
+use crate::auth;
 use crate::config::ModelSpec;
 use crate::engine::{self, DatabaseEngine};
 use crate::migration::Migration;
@@ -100,16 +101,30 @@ impl<'a> AgentLoop<'a> {
     /// `prior_migrations` are the existing migrations that define the previous state.
     /// `next_sequence` is the sequence number for the new migration.
     pub async fn run(&self, prior_migrations: &[Migration], next_sequence: u64) -> Result<MigrationResult, Error> {
+        // Ollama runs locally and doesn't need an API key.
+        let api_key = if self.model.provider == "ollama" {
+            None
+        } else {
+            Some(auth::resolve_api_key(self.model.provider).ok_or_else(|| {
+                let hint = auth::provider_info(self.model.provider)
+                    .map(|info| format!(" (set {} or run `aim auth`)", info.env_var))
+                    .unwrap_or_default();
+                Error::Llm(format!("no API key found for {}{hint}", self.model.provider))
+            })?)
+        };
+
         // Dispatch to the correct provider. Each provider has a different
         // concrete Client type, so we use a macro to avoid duplication.
+        // The `.into()` call converts String to the provider-specific key
+        // type (e.g. BearerAuth, GeminiApiKey) — all implement From<String>.
         macro_rules! run_with_provider {
-            ($provider_mod:path) => {{
+            ($provider_mod:path, $key:expr) => {{
                 use $provider_mod as provider;
                 // Suppress the default panic hook output so we can
                 // report the error cleanly.
                 let prev_hook = std::panic::take_hook();
                 std::panic::set_hook(Box::new(|_| {}));
-                let result = std::panic::catch_unwind(provider::Client::from_env);
+                let result = std::panic::catch_unwind(|| provider::Client::from_val($key));
                 std::panic::set_hook(prev_hook);
                 let client = result.map_err(|e| {
                     let msg = e
@@ -124,19 +139,23 @@ impl<'a> AgentLoop<'a> {
             }};
         }
 
+        // Unwrap is safe: we checked above that api_key is Some for all
+        // non-ollama providers. The `.into()` is a no-op for providers
+        // whose Input type is String, but required for others.
+        #[allow(clippy::useless_conversion)]
         match self.model.provider {
-            "anthropic" => run_with_provider!(rig::providers::anthropic),
-            "openai" => run_with_provider!(rig::providers::openai),
-            "cohere" => run_with_provider!(rig::providers::cohere),
-            "deepseek" => run_with_provider!(rig::providers::deepseek),
-            "gemini" => run_with_provider!(rig::providers::gemini),
-            "groq" => run_with_provider!(rig::providers::groq),
-            "mistral" => run_with_provider!(rig::providers::mistral),
-            "openrouter" => run_with_provider!(rig::providers::openrouter),
-            "together" => run_with_provider!(rig::providers::together),
-            "xai" => run_with_provider!(rig::providers::xai),
-            "ollama" => run_with_provider!(rig::providers::ollama),
-            "perplexity" => run_with_provider!(rig::providers::perplexity),
+            "anthropic" => run_with_provider!(rig::providers::anthropic, api_key.unwrap().into()),
+            "openai" => run_with_provider!(rig::providers::openai, api_key.unwrap().into()),
+            "cohere" => run_with_provider!(rig::providers::cohere, api_key.unwrap().into()),
+            "deepseek" => run_with_provider!(rig::providers::deepseek, api_key.unwrap().into()),
+            "gemini" => run_with_provider!(rig::providers::gemini, api_key.unwrap().into()),
+            "groq" => run_with_provider!(rig::providers::groq, api_key.unwrap().into()),
+            "mistral" => run_with_provider!(rig::providers::mistral, api_key.unwrap().into()),
+            "openrouter" => run_with_provider!(rig::providers::openrouter, api_key.unwrap().into()),
+            "together" => run_with_provider!(rig::providers::together, api_key.unwrap().into()),
+            "xai" => run_with_provider!(rig::providers::xai, api_key.unwrap().into()),
+            "ollama" => run_with_provider!(rig::providers::ollama, rig::client::Nothing),
+            "perplexity" => run_with_provider!(rig::providers::perplexity, api_key.unwrap().into()),
             other => Err(Error::Llm(format!("unsupported provider: {other}"))),
         }
     }
