@@ -319,9 +319,9 @@ async fn cmd_generate(cli: &Cli, dry_run: bool) -> Result<(), Box<dyn std::error
     let prefix = engine.migration_prefix();
     let suffix = engine.migration_suffix();
     println!("\n-- UP --");
-    display::highlight_sql(&format!("{prefix}{}\n{suffix}", engine.format_sql(&m.up_sql)));
+    display::highlight_sql(&format!("{prefix}{}\n{suffix}", m.up_sql));
     println!("\n-- DOWN --");
-    display::highlight_sql(&format!("{prefix}{}\n{suffix}", engine.format_sql(&m.down_sql)));
+    display::highlight_sql(&format!("{prefix}{}\n{suffix}", m.down_sql));
 
     Ok(())
 }
