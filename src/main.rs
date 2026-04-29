@@ -285,7 +285,7 @@ async fn cmd_generate(cli: &Cli, dry_run: bool) -> Result<(), Box<dyn std::error
         config.context.clone(),
     );
 
-    let result = match agent_loop.run(&prior, next_seq).await {
+    let result = match agent_loop.run(&prior, next_seq, &diff).await {
         Ok(r) => r,
         Err(agent::Error::NoChanges) => return Ok(()),
         Err(e) => return Err(e.into()),

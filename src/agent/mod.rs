@@ -107,7 +107,12 @@ impl<'a> AgentLoop<'a> {
     ///
     /// `prior_migrations` are the existing migrations that define the previous state.
     /// `next_sequence` is the sequence number for the new migration.
-    pub async fn run(&self, prior_migrations: &[Migration], next_sequence: u64) -> Result<MigrationResult, Error> {
+    pub async fn run(
+        &self,
+        prior_migrations: &[Migration],
+        next_sequence: u64,
+        schema_diff: &str,
+    ) -> Result<MigrationResult, Error> {
         // Ollama runs locally and doesn't need an API key.
         let api_key = if self.model.provider == "ollama" {
             None
@@ -141,7 +146,7 @@ impl<'a> AgentLoop<'a> {
                         .unwrap_or("unknown error");
                     Error::Llm(format!("failed to create {} client: {msg}", self.model.provider))
                 })?;
-                self.run_with_client(&client, prior_migrations, next_sequence)
+                self.run_with_client(&client, prior_migrations, next_sequence, schema_diff)
                     .await
             }};
         }
@@ -173,6 +178,7 @@ impl<'a> AgentLoop<'a> {
         client: &C,
         prior_migrations: &[Migration],
         next_sequence: u64,
+        schema_diff: &str,
     ) -> Result<MigrationResult, Error>
     where
         C: CompletionClient,
@@ -215,15 +221,19 @@ impl<'a> AgentLoop<'a> {
             })
             .build();
 
-        let initial_prompt = "Generate the migration. Use the tools to read the schema and \
-             existing migrations, then call the submit_migration tool with your result.";
+        let initial_prompt = format!(
+            "Generate the migration. Use the tools to read the schemas, then call \
+             submit_migration with your result.\n\n\
+             Here is a summary of what changed between the previous and desired schemas:\n\
+             ```\n{schema_diff}\n```"
+        );
 
         // Chat history persists across retries so the LLM can see its
         // prior attempts, the schemas it read, and the error feedback.
         let mut history: Vec<Message> = Vec::new();
 
         // First attempt.
-        prompt_agent(&agent, initial_prompt, &mut history, &slot, self.max_tokens).await?;
+        prompt_agent(&agent, &initial_prompt, &mut history, &slot, self.max_tokens).await?;
         let mut candidate = take_slot(&slot)?;
 
         // Verify + retry loop.
