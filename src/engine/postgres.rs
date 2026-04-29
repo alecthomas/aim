@@ -316,14 +316,27 @@ impl DatabaseEngine for PostgresEngine {
     }
 
     fn dialect_description(&self) -> &str {
-        "PostgreSQL. Use standard PostgreSQL DDL syntax. \
-         Use SERIAL or GENERATED ALWAYS AS IDENTITY for auto-increment columns. \
-         ALTER TABLE supports ADD COLUMN, DROP COLUMN, ALTER COLUMN (SET/DROP NOT NULL, \
-         SET DATA TYPE, SET DEFAULT, DROP DEFAULT), and RENAME COLUMN. \
-         Do NOT use CREATE INDEX CONCURRENTLY — most migration runners execute inside a transaction where it is not allowed. Use plain CREATE INDEX. \
-         Do NOT schema-qualify index names (CREATE INDEX idx_name, not CREATE INDEX public.idx_name). \
-         Do NOT include transaction wrappers (BEGIN/COMMIT). \
-         Prefer IF EXISTS / IF NOT EXISTS where appropriate."
+        "PostgreSQL. Write clean, idiomatic PostgreSQL DDL. \
+         The read_schema and read_previous_schema tools return pg_dump output \
+         which is verbose and decomposed — do NOT mimic that style. \
+         Instead, write migration SQL the way a human DBA would.
+
+## Style rules
+- Do NOT schema-qualify names. Write `users`, not `public.users`.
+- Use short type aliases: `BIGSERIAL` not `bigint` + separate sequence, \
+  `VARCHAR(n)` not `character varying(n)`, `TIMESTAMPTZ` not `timestamp with time zone`, \
+  `BOOL` not `boolean`, `INT` not `integer`.
+- Use BIGSERIAL/SERIAL for auto-increment primary keys — never decompose into \
+  CREATE SEQUENCE + ALTER COLUMN SET DEFAULT nextval(...).
+- Put PRIMARY KEY, UNIQUE, NOT NULL, DEFAULT, and FOREIGN KEY constraints inline \
+  in CREATE TABLE — do NOT split them into separate ALTER TABLE statements.
+- For CREATE INDEX, omit `USING btree` (it is the default).
+- Do NOT use CREATE INDEX CONCURRENTLY — most migration runners execute inside \
+  a transaction where it is not allowed.
+- Do NOT include transaction wrappers (BEGIN/COMMIT).
+- Prefer IF EXISTS / IF NOT EXISTS where appropriate.
+- ALTER TABLE supports ADD COLUMN, DROP COLUMN, ALTER COLUMN (SET/DROP NOT NULL, \
+  SET DATA TYPE, SET DEFAULT, DROP DEFAULT), and RENAME COLUMN."
     }
 }
 
