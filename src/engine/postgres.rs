@@ -336,7 +336,11 @@ impl DatabaseEngine for PostgresEngine {
 - Do NOT include transaction wrappers (BEGIN/COMMIT).
 - Prefer IF EXISTS / IF NOT EXISTS where appropriate.
 - ALTER TABLE supports ADD COLUMN, DROP COLUMN, ALTER COLUMN (SET/DROP NOT NULL, \
-  SET DATA TYPE, SET DEFAULT, DROP DEFAULT), and RENAME COLUMN."
+  SET DATA TYPE, SET DEFAULT, DROP DEFAULT), and RENAME COLUMN.
+- When enum values are renamed or replaced, UPDATE existing rows to map old values \
+  to their new equivalents before altering the type. Use ALTER TYPE ... RENAME VALUE \
+  when simply renaming. When restructuring an enum, create the new type, ALTER COLUMN \
+  SET DATA TYPE using a USING clause to map old values, then drop the old type."
     }
 }
 
