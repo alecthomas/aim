@@ -98,8 +98,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_init(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let config_path = cwd.join("aim.toml");
-    let schema_path = cwd.join("schema.sql");
-    let migrations_dir = cwd.join("migrations");
+
+    let schema = cli.schema.as_deref().unwrap_or("schema.sql");
+    let migrations = cli.migrations.as_deref().unwrap_or("migrations");
+    let schema_path = cwd.join(schema);
+    let migrations_dir = cwd.join(migrations);
 
     let engine = cli.engine.clone().ok_or("--engine is required for init")?;
     let format = cli.format.unwrap_or(FormatKind::Migrate);
@@ -109,7 +112,10 @@ fn cmd_init(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Err("aim.toml already exists".into());
     }
 
-    std::fs::write(&config_path, Config::default_toml(&engine, model.as_ref(), format))?;
+    std::fs::write(
+        &config_path,
+        Config::default_toml(&engine, model.as_ref(), format, schema, migrations),
+    )?;
     if !schema_path.exists() {
         std::fs::write(&schema_path, "")?;
     }

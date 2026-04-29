@@ -332,12 +332,18 @@ impl Config {
     }
 
     /// Generate a default `aim.toml` string.
-    pub fn default_toml(engine: &EngineKind, model: Option<&ModelSpec>, format: FormatKind) -> String {
+    pub fn default_toml(
+        engine: &EngineKind,
+        model: Option<&ModelSpec>,
+        format: FormatKind,
+        schema: &str,
+        migrations: &str,
+    ) -> String {
         let mut toml = format!(
             r#"engine = "{engine}"
 format = "{format}"
-schema = "schema.sql"
-migrations = "migrations"
+schema = "{schema}"
+migrations = "{migrations}"
 max_retries = 3
 "#
         );
@@ -391,14 +397,26 @@ mod tests {
     #[test]
     fn test_default_toml_with_model() {
         let model = ModelSpec::parse("anthropic-claude-haiku-4-5-20251001").expect("parse");
-        let toml = Config::default_toml(&EngineKind::Sqlite, Some(&model), FormatKind::Migrate);
+        let toml = Config::default_toml(
+            &EngineKind::Sqlite,
+            Some(&model),
+            FormatKind::Migrate,
+            "schema.sql",
+            "migrations",
+        );
         assert!(toml.contains(r#"engine = "sqlite""#));
         assert!(toml.contains(r#"model = "anthropic-claude-haiku-4-5-20251001""#));
     }
 
     #[test]
     fn test_default_toml_without_model() {
-        let toml = Config::default_toml(&EngineKind::Sqlite, None, FormatKind::Migrate);
+        let toml = Config::default_toml(
+            &EngineKind::Sqlite,
+            None,
+            FormatKind::Migrate,
+            "schema.sql",
+            "migrations",
+        );
         assert!(toml.contains(r#"engine = "sqlite""#));
         assert!(!toml.contains("model"));
     }
@@ -406,8 +424,21 @@ mod tests {
     #[test]
     fn test_default_toml_postgres() {
         let engine = EngineKind::Postgres { version: "16".into() };
-        let toml = Config::default_toml(&engine, None, FormatKind::Migrate);
+        let toml = Config::default_toml(&engine, None, FormatKind::Migrate, "schema.sql", "migrations");
         assert!(toml.contains(r#"engine = "postgres-16""#));
+    }
+
+    #[test]
+    fn test_default_toml_custom_schema_and_migrations() {
+        let toml = Config::default_toml(
+            &EngineKind::Sqlite,
+            None,
+            FormatKind::Migrate,
+            "./internal/db/schema/schema.sql",
+            "./internal/db/schema/migrations",
+        );
+        assert!(toml.contains(r#"schema = "./internal/db/schema/schema.sql""#));
+        assert!(toml.contains(r#"migrations = "./internal/db/schema/migrations""#));
     }
 
     #[test]
