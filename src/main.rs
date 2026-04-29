@@ -63,6 +63,8 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Validate all migrations: UP, DOWN, and UP+DOWN+UP idempotency.
+    Validate,
     /// Configure API key for an LLM provider.
     Auth {
         /// Provider name (e.g. anthropic, openai). Inferred from aim.toml if omitted.
@@ -102,6 +104,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Init => cmd_init(&cli)?,
         Command::Diff => cmd_diff(&cli)?,
         Command::Generate { dry_run } => cmd_generate(&cli, dry_run).await?,
+        Command::Validate => cmd_validate(&cli)?,
         Command::Auth { ref provider } => cmd_auth(&cli, provider.clone())?,
     }
     Ok(())
@@ -321,4 +324,131 @@ async fn cmd_generate(cli: &Cli, dry_run: bool) -> Result<(), Box<dyn std::error
     display::highlight_sql(&format!("{prefix}{}\n{suffix}", engine.format_sql(&m.down_sql)));
 
     Ok(())
+}
+
+fn cmd_validate(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    use yansi::Paint;
+
+    let cwd = std::env::current_dir()?;
+    let config = Config::load(&cwd, cli.overrides())?;
+    let engine = create_engine(&config)?;
+    let format = config.format.create();
+    let dialect = engine.dialect();
+
+    let migrations = format.list(&config.migrations_dir)?;
+    if migrations.is_empty() {
+        Output::success("no migrations to validate");
+        return Ok(());
+    }
+
+    Output::phase(&format!("Validating {} migration(s)...", migrations.len()));
+
+    let expected_db = engine.create_ephemeral()?;
+    let mut failures = 0u32;
+
+    for (i, migration) in migrations.iter().enumerate() {
+        let prev_schema = engine.dump_schema(&expected_db)?;
+
+        engine.execute(&expected_db, &migration.up_sql)?;
+        let expected_up_schema = engine.dump_schema(&expected_db)?;
+
+        let label = format!("{:06}_{}", migration.sequence, migration.description);
+        print!("  {} {label} ", "check".cyan().bold());
+
+        let test_db = engine.create_ephemeral()?;
+        for prior in &migrations[..i] {
+            engine.execute(&test_db, &prior.up_sql)?;
+        }
+
+        // UP test
+        let up_ok = match engine.execute_in_transaction(&test_db, &migration.up_sql) {
+            Ok(()) => {
+                let schema = engine.dump_schema(&test_db)?;
+                let diff = engine::schema_diff(dialect.as_ref(), &expected_up_schema, "expected", &schema, "after up");
+                if diff.is_empty() {
+                    true
+                } else {
+                    println!();
+                    Output::error("UP schema mismatch");
+                    Output::diff("up", &diff);
+                    false
+                }
+            }
+            Err(e) => {
+                println!();
+                Output::error(&format!("UP failed: {e}"));
+                false
+            }
+        };
+
+        // DOWN test
+        let down_ok = match engine.execute_in_transaction(&test_db, &migration.down_sql) {
+            Ok(()) => {
+                let schema = engine.dump_schema(&test_db)?;
+                let diff = engine::schema_diff(dialect.as_ref(), &prev_schema, "expected", &schema, "after down");
+                if diff.is_empty() {
+                    true
+                } else {
+                    println!();
+                    Output::error("DOWN schema mismatch");
+                    Output::diff("down", &diff);
+                    false
+                }
+            }
+            Err(e) => {
+                println!();
+                Output::error(&format!("DOWN failed: {e}"));
+                false
+            }
+        };
+
+        // UP+DOWN+UP idempotency test
+        let idem_ok = if down_ok {
+            match engine.execute_in_transaction(&test_db, &migration.up_sql) {
+                Ok(()) => {
+                    let schema = engine.dump_schema(&test_db)?;
+                    let diff = engine::schema_diff(
+                        dialect.as_ref(),
+                        &expected_up_schema,
+                        "expected",
+                        &schema,
+                        "after up+down+up",
+                    );
+                    if diff.is_empty() {
+                        true
+                    } else {
+                        println!();
+                        Output::error("UP+DOWN+UP schema mismatch");
+                        Output::diff("idempotency", &diff);
+                        false
+                    }
+                }
+                Err(e) => {
+                    println!();
+                    Output::error(&format!("UP+DOWN+UP failed: {e}"));
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        engine.drop_ephemeral(test_db)?;
+
+        if up_ok && down_ok && idem_ok {
+            println!("{}", "ok".green().bold());
+        } else {
+            failures += 1;
+        }
+    }
+
+    engine.drop_ephemeral(expected_db)?;
+
+    println!();
+    if failures == 0 {
+        Output::success(&format!("all {} migration(s) validated", migrations.len()));
+        Ok(())
+    } else {
+        Err(format!("{failures} migration(s) failed validation").into())
+    }
 }
