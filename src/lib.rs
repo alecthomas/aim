@@ -9,3 +9,4 @@ pub mod error;
 pub mod migration;
 pub mod output;
 pub mod schema;
+pub mod seed;

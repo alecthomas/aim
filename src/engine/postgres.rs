@@ -315,8 +315,8 @@ impl DatabaseEngine for PostgresEngine {
          Use SERIAL or GENERATED ALWAYS AS IDENTITY for auto-increment columns. \
          ALTER TABLE supports ADD COLUMN, DROP COLUMN, ALTER COLUMN (SET/DROP NOT NULL, \
          SET DATA TYPE, SET DEFAULT, DROP DEFAULT), and RENAME COLUMN. \
-         Use CREATE INDEX CONCURRENTLY for production-safe index creation. \
-         Do NOT schema-qualify index names (CREATE INDEX CONCURRENTLY idx_name, not CREATE INDEX CONCURRENTLY public.idx_name). \
+         Do NOT use CREATE INDEX CONCURRENTLY — most migration runners execute inside a transaction where it is not allowed. Use plain CREATE INDEX. \
+         Do NOT schema-qualify index names (CREATE INDEX idx_name, not CREATE INDEX public.idx_name). \
          Do NOT include transaction wrappers (BEGIN/COMMIT). \
          Prefer IF EXISTS / IF NOT EXISTS where appropriate."
     }

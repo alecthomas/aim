@@ -7,7 +7,7 @@ use aim::engine::postgres::PostgresEngine;
 use aim::engine::sqlite::SqliteEngine;
 use aim::engine::{self, DatabaseEngine};
 use aim::output::Output;
-use aim::{agent, display};
+use aim::{agent, display, seed};
 
 #[derive(Parser)]
 #[command(
@@ -299,6 +299,20 @@ async fn cmd_generate(cli: &Cli, dry_run: bool) -> Result<(), Box<dyn std::error
         println!("{}", "Generated...".bold());
         println!("Wrote {}", format.describe_written(m));
     }
+    if !result.seed_data.is_empty() {
+        let inserts = seed::build_insert_statements(&result.seed_data);
+        println!("\n-- SEED INSERT --");
+        display::highlight_sql(&inserts);
+
+        let selects_up = seed::build_select_statements(&result.seed_data, seed::Direction::Up);
+        println!("\n-- SEED SELECT (after up) --");
+        display::highlight_sql(&selects_up);
+
+        let selects_down = seed::build_select_statements(&result.seed_data, seed::Direction::Down);
+        println!("\n-- SEED SELECT (after down) --");
+        display::highlight_sql(&selects_down);
+    }
+
     let prefix = engine.migration_prefix();
     let suffix = engine.migration_suffix();
     println!("\n-- UP --");

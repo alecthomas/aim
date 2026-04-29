@@ -70,6 +70,7 @@ impl From<crate::engine::Error> for Error {
 #[derive(Debug)]
 pub struct MigrationResult {
     pub migration: Migration,
+    pub seed_data: std::collections::HashMap<String, tools::TableSeedData>,
 }
 
 /// Orchestrates the LLM agent loop: generate candidate migrations,
@@ -309,7 +310,10 @@ impl<'a> AgentLoop<'a> {
                     up_sql: candidate.up_sql,
                     down_sql: candidate.down_sql,
                 };
-                return Ok(MigrationResult { migration });
+                return Ok(MigrationResult {
+                    migration,
+                    seed_data: candidate.seed_data,
+                });
             }
 
             Output::diff("up migration does not produce identical schema", &up_diff);
