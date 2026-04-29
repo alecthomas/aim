@@ -18,6 +18,15 @@ SQL dialect: {dialect}
 - Column order does not matter. Never recreate a table just to reorder columns.
 - Use ALTER TABLE ADD COLUMN when adding columns.
 
+## Data Loss Warnings
+Add a `-- WARNING: <description>` SQL comment before any statement that could cause
+data loss or requires caution. Examples:
+- Dropping a column or table
+- Changing a column type that may truncate or fail on existing data
+- Removing or renaming enum values
+- Adding a NOT NULL constraint without a DEFAULT on an existing column
+- Dropping an index that may affect query performance
+
 ## Seed Data Rules
 You MUST provide seed_data to verify that migrations preserve existing data.
 
