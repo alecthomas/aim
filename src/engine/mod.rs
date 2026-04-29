@@ -67,6 +67,16 @@ pub trait DatabaseEngine: Send + Sync {
     /// Execute arbitrary SQL against an ephemeral database.
     fn execute(&self, db: &EphemeralDb, sql: &str) -> Result<(), Error>;
 
+    /// Execute SQL wrapped in a transaction.
+    ///
+    /// Emulates how most migration runners execute migrations.
+    /// Engines that support transactional DDL (SQLite, PostgreSQL) override
+    /// this to wrap in BEGIN/COMMIT. Engines that don't (MySQL/MariaDB)
+    /// use the default which just calls `execute`.
+    fn execute_in_transaction(&self, db: &EphemeralDb, sql: &str) -> Result<(), Error> {
+        self.execute(db, sql)
+    }
+
     /// Dump the raw schema of an ephemeral database as DDL statements
     /// separated by `;\n\n`.
     ///

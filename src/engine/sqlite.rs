@@ -38,6 +38,15 @@ impl DatabaseEngine for SqliteEngine {
         Ok(())
     }
 
+    fn execute_in_transaction(&self, db: &EphemeralDb, sql: &str) -> Result<(), Error> {
+        let conn = Self::open(db)?;
+        conn.execute_batch("PRAGMA foreign_keys = OFF;")
+            .map_err(|e| Error::Execution(format!("disabling foreign keys: {e}")))?;
+        conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+            .map_err(|e| Error::Execution(format!("{e}")))?;
+        Ok(())
+    }
+
     fn dump_schema(&self, db: &EphemeralDb) -> Result<String, Error> {
         let conn = Self::open(db)?;
         let mut stmt = conn

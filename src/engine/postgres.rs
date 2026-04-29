@@ -290,6 +290,11 @@ impl DatabaseEngine for PostgresEngine {
         Self::psql_exec(&container, &db.id, sql)
     }
 
+    fn execute_in_transaction(&self, db: &EphemeralDb, sql: &str) -> Result<(), Error> {
+        let container = self.ensure_container()?;
+        Self::psql_exec(&container, &db.id, &format!("BEGIN;\n{sql}\nCOMMIT;"))
+    }
+
     fn dump_schema(&self, db: &EphemeralDb) -> Result<String, Error> {
         let container = self.ensure_container()?;
         let dump = Self::pg_dump(&container, &db.id)?;

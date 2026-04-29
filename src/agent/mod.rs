@@ -385,7 +385,7 @@ impl<'a> AgentLoop<'a> {
         for m in prior_migrations {
             self.engine.execute(&db_right, &m.up_sql)?;
         }
-        self.engine.execute(&db_right, &candidate.up_sql)?;
+        self.engine.execute_in_transaction(&db_right, &candidate.up_sql)?;
 
         // Compare up migration result.
         let desired = self.engine.dump_schema(&db_left)?;
@@ -394,7 +394,7 @@ impl<'a> AgentLoop<'a> {
         let up_diff = engine::schema_diff(dialect.as_ref(), &desired, "schema.sql", &after_up, "migration result");
 
         // Verify down: apply down to db_right, compare with previous state.
-        self.engine.execute(&db_right, &candidate.down_sql)?;
+        self.engine.execute_in_transaction(&db_right, &candidate.down_sql)?;
 
         let db_prev = self.engine.create_ephemeral()?;
         for m in prior_migrations {
