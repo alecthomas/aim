@@ -10,6 +10,9 @@ use rig::agent::Agent;
 use rig::client::{CompletionClient, ProviderClient};
 use rig::completion::{CompletionModel, Prompt};
 use rig::message::Message;
+use sqlparser::ast::{SetExpr, Statement};
+use sqlparser::dialect::Dialect;
+use sqlparser::parser::Parser;
 
 use crate::auth;
 use crate::config::ModelSpec;
@@ -324,6 +327,42 @@ impl<'a> AgentLoop<'a> {
                 continue;
             }
             Output::success("seed data covers all tables");
+
+            // Reject migrations that embed literal/seed data. These run against
+            // real production data, so only transforms deriving from existing
+            // rows are allowed.
+            let dml_issues = migration_literal_data_issues(dialect.as_ref(), &candidate);
+            if !dml_issues.is_empty() {
+                let msg = dml_issues
+                    .iter()
+                    .map(|i| format!("- {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Output::error(&format!("Migration contains disallowed literal data:\n{msg}"));
+
+                if attempt > self.max_retries {
+                    Output::error("verification failed after all retries");
+                    return Err(Error::VerificationFailed {
+                        attempts: attempt,
+                        last_up_diff: msg.clone(),
+                        last_down_diff: msg,
+                    });
+                }
+
+                Output::retry(attempt, self.max_retries);
+                let retry_prompt = format!(
+                    "Your migration includes literal data INSERTs, which are not allowed:\n{msg}\n\n\
+                     Migrations must NEVER contain seed or sample data — they run against real \
+                     production data, not the seed rows. Only transform EXISTING data using \
+                     UPDATE/DELETE, or `INSERT ... SELECT ... FROM <existing table>` (e.g. copy \
+                     rows when rebuilding a table). Remove the literal INSERTs and call \
+                     `submit_migration` again."
+                );
+                prompt_agent(&agent, &retry_prompt, &mut history, &slot, self.max_tokens).await?;
+                candidate = take_slot(&slot)?;
+                continue;
+            }
+            Output::success("no literal seed data in migration");
 
             // Verification can fail with an engine error (e.g. invalid SQL).
             // Treat that as a retryable failure, not a fatal error.
@@ -641,6 +680,80 @@ fn validate_seed_coverage(
     issues
 }
 
+/// Detect disallowed literal-data INSERTs in a candidate migration.
+///
+/// Migrations must never embed seed/sample data: they run against real
+/// production data, not the seed rows used for verification. Only transforms
+/// that derive from existing rows are allowed (`UPDATE`/`DELETE`, or
+/// `INSERT ... SELECT` reading FROM a table). This returns a message for each
+/// `INSERT` whose source introduces literal rows.
+fn migration_literal_data_issues(dialect: &dyn Dialect, candidate: &MigrationOutput) -> Vec<String> {
+    let mut issues = Vec::new();
+    for (label, sql) in [("up_sql", &candidate.up_sql), ("down_sql", &candidate.down_sql)] {
+        for stmt in parse_statements_best_effort(dialect, sql) {
+            let Statement::Insert(insert) = &stmt else {
+                continue;
+            };
+            let introduces_literals = match &insert.source {
+                Some(query) => source_introduces_literals(&query.body),
+                // `INSERT ... DEFAULT VALUES` inserts a literal row.
+                None => true,
+            };
+            if introduces_literals {
+                issues.push(format!(
+                    "{label} contains an INSERT with literal row values (`{}`); migrations must \
+                     not insert seed/sample data",
+                    one_line(&stmt.to_string())
+                ));
+            }
+        }
+    }
+    issues
+}
+
+/// Whether an INSERT source introduces literal rows rather than deriving them
+/// from existing tables. `VALUES` clauses and constant-only `SELECT`s (no
+/// `FROM`) are literal; a `SELECT`/`TABLE` reading from a table is not.
+fn source_introduces_literals(expr: &SetExpr) -> bool {
+    match expr {
+        SetExpr::Values(_) => true,
+        SetExpr::Select(select) => select.from.is_empty(),
+        SetExpr::Query(query) => source_introduces_literals(&query.body),
+        SetExpr::SetOperation { left, right, .. } => {
+            source_introduces_literals(left) || source_introduces_literals(right)
+        }
+        // `TABLE t`, or nested INSERT/UPDATE sources, read from existing data.
+        _ => false,
+    }
+}
+
+/// Parse SQL into statements, tolerating dialect quirks.
+///
+/// Tries to parse the whole input; on failure, parses statement-by-statement
+/// (split on `;`) and keeps whatever parses, so an unparseable DDL statement
+/// does not hide an analyzable INSERT elsewhere in the migration.
+fn parse_statements_best_effort(dialect: &dyn Dialect, sql: &str) -> Vec<Statement> {
+    if let Ok(statements) = Parser::parse_sql(dialect, sql) {
+        return statements;
+    }
+    sql.split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| Parser::parse_sql(dialect, s).ok())
+        .flatten()
+        .collect()
+}
+
+/// Collapse whitespace and truncate a SQL statement for error messages.
+fn one_line(sql: &str) -> String {
+    let collapsed = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.len() > 80 {
+        format!("{}...", &collapsed[..80])
+    } else {
+        collapsed
+    }
+}
+
 /// Append a data-preservation mismatch to an existing schema diff string.
 ///
 /// Mismatches are folded into the diff so the agent's existing retry loop
@@ -940,6 +1053,71 @@ mod tests {
             result.is_err(),
             "NOT NULL add without default should fail on populated table"
         );
+    }
+
+    fn candidate_sql(up: &str, down: &str) -> MigrationOutput {
+        MigrationOutput {
+            up_sql: up.into(),
+            down_sql: down.into(),
+            description: "test".into(),
+            seed_data: HashMap::new(),
+        }
+    }
+
+    fn literal_issues(up: &str, down: &str) -> Vec<String> {
+        let dialect = sqlparser::dialect::SQLiteDialect {};
+        migration_literal_data_issues(&dialect, &candidate_sql(up, down))
+    }
+
+    #[test]
+    fn test_literal_insert_values_rejected() {
+        let issues = literal_issues("INSERT INTO t (id, name) VALUES (1, 'a');", "DELETE FROM t;");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].contains("up_sql"), "{}", issues[0]);
+    }
+
+    #[test]
+    fn test_insert_default_values_rejected() {
+        let issues = literal_issues("INSERT INTO t DEFAULT VALUES;", "");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+    }
+
+    #[test]
+    fn test_constant_select_without_from_rejected() {
+        // Literal data smuggled through a constant SELECT (no FROM).
+        let issues = literal_issues("INSERT INTO t (id) SELECT 1 UNION ALL SELECT 2;", "");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+    }
+
+    #[test]
+    fn test_union_with_constant_branch_rejected() {
+        let issues = literal_issues("INSERT INTO t (id) SELECT id FROM other UNION ALL SELECT 99;", "");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+    }
+
+    #[test]
+    fn test_insert_select_from_table_allowed() {
+        let issues = literal_issues(
+            "INSERT INTO new_t (id, name) SELECT id, name FROM old_t;",
+            "INSERT INTO old_t (id, name) SELECT id, name FROM new_t;",
+        );
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    #[test]
+    fn test_insert_select_from_table_with_constant_column_allowed() {
+        // Constant columns in the projection are fine when rows come from a table.
+        let issues = literal_issues("INSERT INTO t (id, status) SELECT id, 'active' FROM src;", "");
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    #[test]
+    fn test_pure_ddl_and_transforms_allowed() {
+        let issues = literal_issues(
+            "ALTER TABLE t ADD COLUMN x INT;\nUPDATE t SET x = id;",
+            "ALTER TABLE t DROP COLUMN x;",
+        );
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]

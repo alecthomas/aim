@@ -12,16 +12,21 @@ SQL dialect: {dialect}
 
 ## Migration Rules
 - Use DDL statements (CREATE, ALTER, DROP, etc.) in up_sql and down_sql.
-- DML statements (UPDATE, INSERT, DELETE) are allowed when needed to transform
-  existing data during a migration (e.g. mapping old enum values to new ones).
+- DML is allowed ONLY to transform data that already exists: use UPDATE/DELETE,
+  or `INSERT ... SELECT ... FROM <existing table>` (e.g. when rebuilding a table,
+  copy rows with `INSERT INTO new_table SELECT ... FROM old_table`).
+- NEVER write `INSERT ... VALUES` or otherwise insert literal/sample rows.
+  Migrations run against real production data, not the seed data. Seed data is
+  provided separately in `seed_data` for verification ONLY and must never appear
+  in up_sql or down_sql.
 - UP applied to previous schema must produce exactly the desired schema.
 - DOWN applied after UP must restore exactly the previous schema.
 - Do NOT include transaction wrappers (BEGIN/COMMIT).
 - Column order does not matter. Never recreate a table just to reorder columns.
 - Use ALTER TABLE ADD COLUMN when adding columns.
 - Migrations MUST be fully automated. NEVER include comments or instructions
-  requiring manual intervention. If data needs to be transformed, include the
-  necessary DML (UPDATE, INSERT, DELETE) statements directly in the migration.
+  requiring manual intervention. If data needs to be transformed, use UPDATE/DELETE
+  or `INSERT ... SELECT` deriving from existing rows.
 
 ## Data Loss Warnings
 Add a `-- WARNING: <description>` SQL comment before any statement that could cause
