@@ -189,9 +189,15 @@ fn cmd_diff(cli: &Cli, exit_code: bool) -> Result<(), Box<dyn std::error::Error>
     engine.execute(&db_desired, &schema_sql)?;
 
     let db_current = engine.create_ephemeral()?;
+    let apply_start = std::time::Instant::now();
     for m in &prior {
         engine.execute(&db_current, &m.up_sql)?;
     }
+    Output::phase(&format!(
+        "Applied {} migration(s) in {:.2?}",
+        prior.len(),
+        apply_start.elapsed()
+    ));
 
     let desired_schema = engine.dump_schema(&db_desired)?;
     let current_schema = engine.dump_schema(&db_current)?;
