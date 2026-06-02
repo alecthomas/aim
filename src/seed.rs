@@ -1,9 +1,14 @@
 use std::collections::HashMap;
 
 use crate::agent::tools::TableSeedData;
+use crate::schema::ArrayColumns;
 
 /// Converts a JSON value to a SQL literal string.
-fn json_value_to_sql_literal(v: &serde_json::Value) -> String {
+///
+/// When `is_array` is true, a JSON array is rendered as a PostgreSQL array
+/// literal (`'{...}'`) rather than as JSON text (`'[...]'`), so values for
+/// array-typed columns insert correctly. Non-array JSON values are unaffected.
+fn json_value_to_sql_literal(v: &serde_json::Value, is_array: bool) -> String {
     match v {
         serde_json::Value::Null => "NULL".to_string(),
         serde_json::Value::Bool(b) => {
@@ -17,10 +22,49 @@ fn json_value_to_sql_literal(v: &serde_json::Value) -> String {
         serde_json::Value::String(s) => {
             format!("'{}'", s.replace('\'', "''"))
         }
+        serde_json::Value::Array(items) if is_array => {
+            // PostgreSQL array literal, e.g. {"a","b"} or {1,2,3}.
+            format!("'{}'", pg_array_body(items).replace('\'', "''"))
+        }
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            // JSON / JSONB column: keep the JSON text form.
             format!("'{}'", v.to_string().replace('\'', "''"))
         }
     }
+}
+
+/// Render a JSON array as a PostgreSQL array literal body, e.g. `{"a","b"}`.
+fn pg_array_body(items: &[serde_json::Value]) -> String {
+    let elements: Vec<String> = items.iter().map(pg_array_element).collect();
+    format!("{{{}}}", elements.join(","))
+}
+
+/// Render a single element of a PostgreSQL array literal.
+///
+/// Strings are double-quoted with `\` and `"` escaped; numbers and booleans
+/// are bare; nested arrays recurse; null is the unquoted `NULL` token.
+fn pg_array_element(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Bool(b) => {
+            if *b {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Array(items) => pg_array_body(items),
+        serde_json::Value::String(s) => quote_array_element(s),
+        // Objects are unusual inside array columns; store their JSON text.
+        serde_json::Value::Object(_) => quote_array_element(&v.to_string()),
+    }
+}
+
+/// Double-quote and escape a string for use as a PostgreSQL array element.
+fn quote_array_element(s: &str) -> String {
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 /// Generates INSERT statements for all tables' seed rows.
@@ -28,7 +72,7 @@ fn json_value_to_sql_literal(v: &serde_json::Value) -> String {
 /// For each table (sorted alphabetically), produces one `INSERT INTO`
 /// statement per row with columns in alphabetical order. Tables are
 /// separated by a blank line.
-pub fn build_insert_statements(seed_data: &HashMap<String, TableSeedData>) -> String {
+pub fn build_insert_statements(seed_data: &HashMap<String, TableSeedData>, array_cols: &ArrayColumns) -> String {
     let mut tables: Vec<&String> = seed_data.keys().collect();
     tables.sort();
 
@@ -45,7 +89,7 @@ pub fn build_insert_statements(seed_data: &HashMap<String, TableSeedData>) -> St
                 let col_list = cols.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ");
                 let val_list = cols
                     .iter()
-                    .map(|c| json_value_to_sql_literal(&row[c.as_str()]))
+                    .map(|c| json_value_to_sql_literal(&row[c.as_str()], is_array_col(array_cols, table, c)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("INSERT INTO {table} ({col_list}) VALUES ({val_list});")
@@ -66,14 +110,19 @@ pub enum Direction {
     Down,
 }
 
+/// Whether `col` in `table` is an array-typed column.
+fn is_array_col(array_cols: &ArrayColumns, table: &str, col: &str) -> bool {
+    array_cols.get(table).is_some_and(|cols| cols.contains(col))
+}
+
 /// Builds a WHERE condition for a single column and value.
 ///
 /// Uses `IS NULL` for null values, `=` for everything else.
-fn where_condition(col: &str, val: &serde_json::Value) -> String {
+fn where_condition(col: &str, val: &serde_json::Value, is_array: bool) -> String {
     if val.is_null() {
         format!("{col} IS NULL")
     } else {
-        format!("{col} = {}", json_value_to_sql_literal(val))
+        format!("{col} = {}", json_value_to_sql_literal(val, is_array))
     }
 }
 
@@ -83,7 +132,11 @@ fn where_condition(col: &str, val: &serde_json::Value) -> String {
 /// produces a `SELECT col1, col2 FROM table WHERE col1 = val1 AND col2 = val2;`.
 /// Columns are sorted alphabetically. Tables are sorted alphabetically,
 /// with a blank line between tables.
-pub fn build_select_statements(seed_data: &HashMap<String, TableSeedData>, direction: Direction) -> String {
+pub fn build_select_statements(
+    seed_data: &HashMap<String, TableSeedData>,
+    direction: Direction,
+    array_cols: &ArrayColumns,
+) -> String {
     let mut tables: Vec<&String> = seed_data.keys().collect();
     tables.sort();
 
@@ -103,7 +156,7 @@ pub fn build_select_statements(seed_data: &HashMap<String, TableSeedData>, direc
                 let col_list = cols.to_vec().join(", ");
                 let conditions = cols
                     .iter()
-                    .map(|c| where_condition(c, &row[*c]))
+                    .map(|c| where_condition(c, &row[*c], is_array_col(array_cols, table, c)))
                     .collect::<Vec<_>>()
                     .join(" AND ");
                 format!("SELECT {col_list} FROM {table} WHERE {conditions};")
@@ -117,52 +170,181 @@ pub fn build_select_statements(seed_data: &HashMap<String, TableSeedData>, direc
     sections.join("\n\n")
 }
 
+/// A data-preservation check derived from seed data, expressed as a
+/// `SELECT COUNT(*)` query plus the count it is expected to return.
+///
+/// Checks are executed by the agent against a database that has had the
+/// migration applied, to confirm rows were preserved/transformed correctly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowCheck {
+    /// The total number of rows in `table` must equal `count`.
+    Total {
+        table: String,
+        count_sql: String,
+        count: usize,
+    },
+    /// At least one row in `table` must match the expected column values.
+    Exists {
+        table: String,
+        count_sql: String,
+        expected: String,
+    },
+}
+
+impl RowCheck {
+    /// The table this check applies to.
+    pub fn table(&self) -> &str {
+        match self {
+            RowCheck::Total { table, .. } | RowCheck::Exists { table, .. } => table,
+        }
+    }
+
+    /// The `SELECT COUNT(*)` query to execute.
+    pub fn count_sql(&self) -> &str {
+        match self {
+            RowCheck::Total { count_sql, .. } | RowCheck::Exists { count_sql, .. } => count_sql,
+        }
+    }
+}
+
+/// Render a row's column values as a stable, human-readable string.
+fn render_row(row: &HashMap<String, serde_json::Value>) -> String {
+    let mut cols: Vec<&String> = row.keys().collect();
+    cols.sort();
+    let parts: Vec<String> = cols.iter().map(|c| format!("{c}={}", row[*c])).collect();
+    format!("{{{}}}", parts.join(", "))
+}
+
+/// Build executable data-preservation checks for the given direction.
+///
+/// For each table (sorted) this produces a total-row-count check plus one
+/// existence check per expected row. Existence checks reuse the same
+/// `=` / `IS NULL` predicates as [`build_select_statements`], so the
+/// comparison logic stays in one place.
+pub fn build_row_checks(
+    seed_data: &HashMap<String, TableSeedData>,
+    direction: Direction,
+    array_cols: &ArrayColumns,
+) -> Vec<RowCheck> {
+    let mut tables: Vec<&String> = seed_data.keys().collect();
+    tables.sort();
+
+    let mut checks = Vec::new();
+    for table in tables {
+        let seed = &seed_data[table.as_str()];
+        let expected = match direction {
+            Direction::Up => &seed.expected_after_up,
+            Direction::Down => &seed.expected_after_down,
+        };
+
+        checks.push(RowCheck::Total {
+            table: table.clone(),
+            count_sql: format!("SELECT COUNT(*) FROM {table}"),
+            count: expected.len(),
+        });
+
+        for row in expected {
+            let mut cols: Vec<&str> = row.keys().map(String::as_str).collect();
+            cols.sort();
+            let count_sql = if cols.is_empty() {
+                format!("SELECT COUNT(*) FROM {table}")
+            } else {
+                let conditions = cols
+                    .iter()
+                    .map(|c| where_condition(c, &row[*c], is_array_col(array_cols, table, c)))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                format!("SELECT COUNT(*) FROM {table} WHERE {conditions}")
+            };
+            checks.push(RowCheck::Exists {
+                table: table.clone(),
+                count_sql,
+                expected: render_row(row),
+            });
+        }
+    }
+    checks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashSet;
+
+    /// No array columns (the common case for non-PostgreSQL schemas).
+    fn no_arrays() -> ArrayColumns {
+        ArrayColumns::new()
+    }
 
     #[test]
     fn literal_null() {
-        assert_eq!(json_value_to_sql_literal(&json!(null)), "NULL");
+        assert_eq!(json_value_to_sql_literal(&json!(null), false), "NULL");
     }
 
     #[test]
     fn literal_bool() {
-        assert_eq!(json_value_to_sql_literal(&json!(true)), "TRUE");
-        assert_eq!(json_value_to_sql_literal(&json!(false)), "FALSE");
+        assert_eq!(json_value_to_sql_literal(&json!(true), false), "TRUE");
+        assert_eq!(json_value_to_sql_literal(&json!(false), false), "FALSE");
     }
 
     #[test]
     fn literal_integer() {
-        assert_eq!(json_value_to_sql_literal(&json!(42)), "42");
+        assert_eq!(json_value_to_sql_literal(&json!(42), false), "42");
     }
 
     #[test]
     fn literal_float() {
-        assert_eq!(json_value_to_sql_literal(&json!(3.14)), "3.14");
+        assert_eq!(json_value_to_sql_literal(&json!(2.5), false), "2.5");
     }
 
     #[test]
     fn literal_string() {
-        assert_eq!(json_value_to_sql_literal(&json!("hello")), "'hello'");
+        assert_eq!(json_value_to_sql_literal(&json!("hello"), false), "'hello'");
     }
 
     #[test]
     fn literal_string_with_quotes() {
-        assert_eq!(json_value_to_sql_literal(&json!("it's a test")), "'it''s a test'");
+        assert_eq!(
+            json_value_to_sql_literal(&json!("it's a test"), false),
+            "'it''s a test'"
+        );
     }
 
     #[test]
-    fn literal_array() {
+    fn literal_array_as_json() {
+        // Non-array column (e.g. JSON/JSONB): keep JSON text form.
         let val = json!([1, 2, 3]);
-        assert_eq!(json_value_to_sql_literal(&val), "'[1,2,3]'");
+        assert_eq!(json_value_to_sql_literal(&val, false), "'[1,2,3]'");
+    }
+
+    #[test]
+    fn literal_array_as_pg_array() {
+        // Array column: render as a PostgreSQL array literal.
+        assert_eq!(json_value_to_sql_literal(&json!([1, 2, 3]), true), "'{1,2,3}'");
+        assert_eq!(json_value_to_sql_literal(&json!(["a", "b"]), true), r#"'{"a","b"}'"#);
+        assert_eq!(json_value_to_sql_literal(&json!([]), true), "'{}'");
+        assert_eq!(json_value_to_sql_literal(&json!([true, false]), true), "'{true,false}'");
+    }
+
+    #[test]
+    fn literal_array_element_escaping() {
+        // Commas, quotes and backslashes in string elements are escaped.
+        assert_eq!(
+            json_value_to_sql_literal(&json!(["a,b", "c\"d"]), true),
+            r#"'{"a,b","c\"d"}'"#
+        );
+        // Single quotes are doubled for the surrounding SQL literal.
+        assert_eq!(
+            json_value_to_sql_literal(&json!(["O'Brien"]), true),
+            r#"'{"O''Brien"}'"#
+        );
     }
 
     #[test]
     fn literal_object() {
         let val = json!({"a": 1});
-        assert_eq!(json_value_to_sql_literal(&val), "'{\"a\":1}'");
+        assert_eq!(json_value_to_sql_literal(&val, false), "'{\"a\":1}'");
     }
 
     fn make_seed_data() -> HashMap<String, TableSeedData> {
@@ -196,7 +378,7 @@ mod tests {
     #[test]
     fn insert_statements_multiple_tables() {
         let data = make_seed_data();
-        let sql = build_insert_statements(&data);
+        let sql = build_insert_statements(&data, &no_arrays());
 
         // "orders" comes before "users" alphabetically
         let expected = "\
@@ -211,7 +393,51 @@ INSERT INTO users (id, name) VALUES (2, 'bob');";
     #[test]
     fn insert_statements_empty() {
         let data: HashMap<String, TableSeedData> = HashMap::new();
-        assert_eq!(build_insert_statements(&data), "");
+        assert_eq!(build_insert_statements(&data, &no_arrays()), "");
+    }
+
+    #[test]
+    fn insert_statements_render_array_columns_as_pg_literals() {
+        let data = HashMap::from([(
+            "acl".to_string(),
+            TableSeedData {
+                rows: vec![HashMap::from([
+                    ("id".to_string(), json!(1)),
+                    ("args".to_string(), json!(["read", "write"])),
+                    ("tags".to_string(), json!([])),
+                ])],
+                expected_after_up: vec![],
+                expected_after_down: vec![],
+            },
+        )]);
+        let array_cols: ArrayColumns = HashMap::from([(
+            "acl".to_string(),
+            HashSet::from(["args".to_string(), "tags".to_string()]),
+        )]);
+        let sql = build_insert_statements(&data, &array_cols);
+        // args/tags use PG array literals; id stays a bare integer.
+        assert_eq!(
+            sql,
+            r#"INSERT INTO acl (args, id, tags) VALUES ('{"read","write"}', 1, '{}');"#
+        );
+    }
+
+    #[test]
+    fn select_statements_match_array_columns() {
+        let data = HashMap::from([(
+            "acl".to_string(),
+            TableSeedData {
+                rows: vec![],
+                expected_after_up: vec![HashMap::from([
+                    ("id".to_string(), json!(1)),
+                    ("args".to_string(), json!(["read"])),
+                ])],
+                expected_after_down: vec![],
+            },
+        )]);
+        let array_cols: ArrayColumns = HashMap::from([("acl".to_string(), HashSet::from(["args".to_string()]))]);
+        let sql = build_select_statements(&data, Direction::Up, &array_cols);
+        assert_eq!(sql, r#"SELECT args, id FROM acl WHERE args = '{"read"}' AND id = 1;"#);
     }
 
     fn make_seed_data_with_expected() -> HashMap<String, TableSeedData> {
@@ -264,7 +490,7 @@ INSERT INTO users (id, name) VALUES (2, 'bob');";
     #[test]
     fn select_statements_after_up() {
         let data = make_seed_data_with_expected();
-        let sql = build_select_statements(&data, Direction::Up);
+        let sql = build_select_statements(&data, Direction::Up, &no_arrays());
 
         let expected = "\
 SELECT id, user_id FROM orders WHERE id = 10 AND user_id = 1;\n\
@@ -278,7 +504,7 @@ SELECT email, id, name FROM users WHERE email = '' AND id = 2 AND name = 'bob';"
     #[test]
     fn select_statements_after_down() {
         let data = make_seed_data_with_expected();
-        let sql = build_select_statements(&data, Direction::Down);
+        let sql = build_select_statements(&data, Direction::Down, &no_arrays());
 
         let expected = "\
 SELECT id, user_id FROM orders WHERE id = 10 AND user_id = 1;\n\
@@ -302,20 +528,76 @@ SELECT id, name FROM users WHERE id = 2 AND name = 'bob';";
                 expected_after_down: vec![],
             },
         )]);
-        let sql = build_select_statements(&data, Direction::Up);
+        let sql = build_select_statements(&data, Direction::Up, &no_arrays());
         assert_eq!(sql, "SELECT id, value FROM settings WHERE id = 1 AND value IS NULL;");
     }
 
     #[test]
     fn select_statements_skips_empty_expected() {
         let data = make_seed_data();
-        let sql = build_select_statements(&data, Direction::Up);
+        let sql = build_select_statements(&data, Direction::Up, &no_arrays());
         assert_eq!(sql, "");
     }
 
     #[test]
     fn select_statements_empty() {
         let data: HashMap<String, TableSeedData> = HashMap::new();
-        assert_eq!(build_select_statements(&data, Direction::Up), "");
+        assert_eq!(build_select_statements(&data, Direction::Up, &no_arrays()), "");
+    }
+
+    #[test]
+    fn row_checks_total_and_existence() {
+        let data = make_seed_data_with_expected();
+        let checks = build_row_checks(&data, Direction::Up, &no_arrays());
+
+        // orders: 1 total + 1 existence; users: 1 total + 2 existence = 5.
+        assert_eq!(checks.len(), 5);
+
+        // First check per table is the total-count check.
+        assert_eq!(
+            checks[0],
+            RowCheck::Total {
+                table: "orders".into(),
+                count_sql: "SELECT COUNT(*) FROM orders".into(),
+                count: 1,
+            }
+        );
+        match &checks[1] {
+            RowCheck::Exists { table, count_sql, .. } => {
+                assert_eq!(table, "orders");
+                assert_eq!(count_sql, "SELECT COUNT(*) FROM orders WHERE id = 10 AND user_id = 1");
+            }
+            other => panic!("expected existence check, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn row_checks_null_uses_is_null() {
+        let data = HashMap::from([(
+            "settings".to_string(),
+            TableSeedData {
+                rows: vec![],
+                expected_after_up: vec![HashMap::from([
+                    ("id".to_string(), json!(1)),
+                    ("value".to_string(), json!(null)),
+                ])],
+                expected_after_down: vec![],
+            },
+        )]);
+        let checks = build_row_checks(&data, Direction::Up, &no_arrays());
+        let exists = checks
+            .iter()
+            .find(|c| matches!(c, RowCheck::Exists { .. }))
+            .expect("existence check");
+        assert_eq!(
+            exists.count_sql(),
+            "SELECT COUNT(*) FROM settings WHERE id = 1 AND value IS NULL"
+        );
+    }
+
+    #[test]
+    fn row_checks_empty() {
+        let data: HashMap<String, TableSeedData> = HashMap::new();
+        assert!(build_row_checks(&data, Direction::Up, &no_arrays()).is_empty());
     }
 }

@@ -178,6 +178,35 @@ impl PostgresEngine {
         Ok(())
     }
 
+    /// Run a query that returns a single scalar value via `psql -tA`.
+    fn psql_scalar(container: &str, db_name: &str, sql: &str) -> Result<String, Error> {
+        let output = Command::new("docker")
+            .args([
+                "exec",
+                container,
+                "psql",
+                "-U",
+                DB_USER,
+                "-d",
+                db_name,
+                "-v",
+                "ON_ERROR_STOP=1",
+                "--no-psqlrc",
+                "-tA",
+                "-c",
+                sql,
+            ])
+            .output()
+            .map_err(|e| Error::Execution(format!("running psql: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Error::Execution(format!("psql error: {stderr}")));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
     /// Dump the schema using pg_dump.
     fn pg_dump(container: &str, db_name: &str) -> Result<String, Error> {
         let output = Command::new("docker")
@@ -307,6 +336,17 @@ impl DatabaseEngine for PostgresEngine {
         Ok(())
     }
 
+    fn count_query(&self, db: &EphemeralDb, sql: &str) -> Result<u64, Error> {
+        let container = self.ensure_container()?;
+        let out = Self::psql_scalar(&container, &db.id, sql)?;
+        out.parse::<u64>()
+            .map_err(|e| Error::Execution(format!("parsing count `{out}`: {e}")))
+    }
+
+    fn fk_disable_prefix(&self) -> &str {
+        "SET session_replication_role = replica;\n"
+    }
+
     fn dialect(&self) -> Box<dyn Dialect> {
         Box::new(PostgreSqlDialect {})
     }
@@ -337,6 +377,11 @@ impl DatabaseEngine for PostgresEngine {
 - Prefer IF EXISTS / IF NOT EXISTS where appropriate.
 - ALTER TABLE supports ADD COLUMN, DROP COLUMN, ALTER COLUMN (SET/DROP NOT NULL, \
   SET DATA TYPE, SET DEFAULT, DROP DEFAULT), and RENAME COLUMN.
+- For array columns use PostgreSQL array types and syntax, NOT JSON. Declare as \
+  `TEXT[]`, `INT[]`, etc. Write array literals as `'{a,b,c}'` (quote/escape string \
+  elements: `'{\"a,b\",\"c\"}'`) or `ARRAY['a','b','c']`. Default an empty array \
+  with `DEFAULT '{}'`. Do NOT use JSON array syntax like `'[\"a\",\"b\"]'` or \
+  `'[1,2,3]'` for array columns — that syntax is only for JSON/JSONB columns.
 - When enum values are renamed or replaced, UPDATE existing rows to map old values \
   to their new equivalents before altering the type. Use ALTER TYPE ... RENAME VALUE \
   when simply renaming. When restructuring an enum, create the new type, ALTER COLUMN \

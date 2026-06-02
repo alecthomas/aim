@@ -310,15 +310,17 @@ async fn cmd_generate(cli: &Cli, dry_run: bool) -> Result<(), Box<dyn std::error
         println!("Wrote {}", format.describe_written(m));
     }
     if !result.seed_data.is_empty() {
-        let inserts = seed::build_insert_statements(&result.seed_data);
+        let inserts = seed::build_insert_statements(&result.seed_data, &result.previous_array_columns);
         println!("\n-- SEED INSERT --");
         display::highlight_sql(&inserts);
 
-        let selects_up = seed::build_select_statements(&result.seed_data, seed::Direction::Up);
+        let selects_up =
+            seed::build_select_statements(&result.seed_data, seed::Direction::Up, &result.desired_array_columns);
         println!("\n-- SEED SELECT (after up) --");
         display::highlight_sql(&selects_up);
 
-        let selects_down = seed::build_select_statements(&result.seed_data, seed::Direction::Down);
+        let selects_down =
+            seed::build_select_statements(&result.seed_data, seed::Direction::Down, &result.previous_array_columns);
         println!("\n-- SEED SELECT (after down) --");
         display::highlight_sql(&selects_down);
     }

@@ -1,6 +1,7 @@
 pub mod prompt;
 pub mod tools;
 
+use std::collections::HashSet;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -16,6 +17,7 @@ use crate::engine::{self, DatabaseEngine};
 use crate::migration::Migration;
 use crate::output::{Output, Spinner};
 use crate::schema;
+use crate::seed;
 
 use tools::MigrationOutput;
 
@@ -71,6 +73,37 @@ impl From<crate::engine::Error> for Error {
 pub struct MigrationResult {
     pub migration: Migration,
     pub seed_data: std::collections::HashMap<String, tools::TableSeedData>,
+    /// Array-typed columns in the previous schema (for rendering seed inserts
+    /// and `expected_after_down` checks).
+    pub previous_array_columns: schema::ArrayColumns,
+    /// Array-typed columns in the desired schema (for `expected_after_up` checks).
+    pub desired_array_columns: schema::ArrayColumns,
+}
+
+/// Outcome of verifying a candidate migration against ephemeral databases.
+///
+/// Schema diffs and seed-data preservation issues are kept separate so the
+/// agent loop can report them with distinct, accurate messaging.
+#[derive(Debug, Default)]
+struct VerifyOutcome {
+    /// Schema diff after UP; empty means the resulting schema matched.
+    up_diff: String,
+    /// Schema diff after DOWN rollback; empty means it matched.
+    down_diff: String,
+    /// Seed-data mismatch detected after UP, if any.
+    up_data_issue: Option<String>,
+    /// Seed-data mismatch detected after DOWN, if any.
+    down_data_issue: Option<String>,
+}
+
+impl VerifyOutcome {
+    /// Whether the migration passed every schema and data-preservation check.
+    fn is_clean(&self) -> bool {
+        self.up_diff.is_empty()
+            && self.down_diff.is_empty()
+            && self.up_data_issue.is_none()
+            && self.down_data_issue.is_none()
+    }
 }
 
 /// Orchestrates the LLM agent loop: generate candidate migrations,
@@ -199,7 +232,11 @@ impl<'a> AgentLoop<'a> {
         let slot: tools::MigrationSlot = Arc::new(Mutex::new(None));
 
         let dialect = self.engine.dialect();
-        let expected_table_count = schema::table_names(dialect.as_ref(), &previous_ddl).len();
+        let previous_tables = schema::table_names(dialect.as_ref(), &previous_ddl);
+        // Array-typed columns per schema, so seed values for them render as
+        // PostgreSQL array literals instead of JSON.
+        let previous_array_columns = schema::array_columns(dialect.as_ref(), &previous_ddl);
+        let desired_array_columns = schema::array_columns(dialect.as_ref(), &desired_ddl);
 
         Output::phase("Generating migration...");
 
@@ -217,13 +254,28 @@ impl<'a> AgentLoop<'a> {
             })
             .tool(tools::SubmitMigration {
                 slot: slot.clone(),
-                expected_table_count,
+                required_tables: previous_tables.clone(),
             })
             .build();
+
+        // Spell out exactly which tables need seed_data so the LLM does not
+        // have to infer the full set from the schema dump (a common cause of
+        // rejected submissions).
+        let seed_requirement = if previous_tables.is_empty() {
+            "The previous schema has no tables, so seed_data must be empty.".to_string()
+        } else {
+            format!(
+                "seed_data MUST contain an entry for EVERY one of these {} previous-schema \
+                 tables, or the submission will be rejected: {}.",
+                previous_tables.len(),
+                previous_tables.join(", ")
+            )
+        };
 
         let initial_prompt = format!(
             "Generate the migration. Use the tools to read the schemas, then call \
              submit_migration with your result.\n\n\
+             {seed_requirement}\n\n\
              Here is a summary of what changed between the previous and desired schemas:\n\
              ```\n{schema_diff}\n```"
         );
@@ -275,7 +327,12 @@ impl<'a> AgentLoop<'a> {
 
             // Verification can fail with an engine error (e.g. invalid SQL).
             // Treat that as a retryable failure, not a fatal error.
-            let (up_diff, down_diff) = match self.verify(&candidate, prior_migrations) {
+            let outcome = match self.verify(
+                &candidate,
+                prior_migrations,
+                &previous_array_columns,
+                &desired_array_columns,
+            ) {
                 Ok(result) => result,
                 Err(Error::Engine(e)) => {
                     let msg = format!("{e}");
@@ -306,14 +363,27 @@ impl<'a> AgentLoop<'a> {
                 Err(e) => return Err(e),
             };
 
-            if up_diff.is_empty() {
+            if outcome.up_diff.is_empty() {
                 Output::success("up migration verified");
             }
-            if down_diff.is_empty() {
+            if outcome.down_diff.is_empty() {
                 Output::success("down migration verified");
             }
 
-            if up_diff.is_empty() && down_diff.is_empty() {
+            // Report seed-data preservation separately from schema diffs.
+            if let Some(msg) = &outcome.up_data_issue {
+                Output::error(&format!("up migration did not preserve seed data: {msg}"));
+            }
+            if let Some(msg) = &outcome.down_data_issue {
+                Output::error(&format!("down migration did not preserve seed data: {msg}"));
+            }
+            // Only claim preservation when there was seed data and both
+            // directions actually ran their data checks (i.e. schemas matched).
+            if !candidate.seed_data.is_empty() && outcome.is_clean() {
+                Output::success("seed data preserved across up and down migrations");
+            }
+
+            if outcome.is_clean() {
                 let migration = Migration {
                     sequence: next_sequence,
                     description: candidate.description,
@@ -323,25 +393,39 @@ impl<'a> AgentLoop<'a> {
                 return Ok(MigrationResult {
                     migration,
                     seed_data: candidate.seed_data,
+                    previous_array_columns: previous_array_columns.clone(),
+                    desired_array_columns: desired_array_columns.clone(),
                 });
             }
 
-            Output::diff("up migration does not produce identical schema", &up_diff);
-            Output::diff("down migration does not restore previous schema", &down_diff);
+            Output::diff("up migration does not produce identical schema", &outcome.up_diff);
+            Output::diff("down migration does not restore previous schema", &outcome.down_diff);
+
+            // Fold data-preservation issues into the diff feedback sent to the
+            // LLM, so it sees both schema and data problems when retrying.
+            let mut up_feedback = outcome.up_diff;
+            if let Some(msg) = &outcome.up_data_issue {
+                append_data_issue(&mut up_feedback, "expected_after_up", msg);
+            }
+            let mut down_feedback = outcome.down_diff;
+            if let Some(msg) = &outcome.down_data_issue {
+                append_data_issue(&mut down_feedback, "expected_after_down", msg);
+            }
 
             if attempt > self.max_retries {
                 Output::error("verification failed after all retries");
                 return Err(Error::VerificationFailed {
                     attempts: attempt,
-                    last_up_diff: up_diff,
-                    last_down_diff: down_diff,
+                    last_up_diff: up_feedback,
+                    last_down_diff: down_feedback,
                 });
             }
 
             Output::retry(attempt, self.max_retries);
 
             // Retry: include diff feedback in a new prompt.
-            let retry_prompt = prompt::retry_message(&up_diff, &down_diff, &candidate.up_sql, &candidate.down_sql);
+            let retry_prompt =
+                prompt::retry_message(&up_feedback, &down_feedback, &candidate.up_sql, &candidate.down_sql);
             prompt_agent(&agent, &retry_prompt, &mut history, &slot, self.max_tokens).await?;
             candidate = take_slot(&slot)?;
         }
@@ -382,19 +466,29 @@ impl<'a> AgentLoop<'a> {
 
     /// Verify a candidate migration against ephemeral databases.
     ///
-    /// Returns (up_diff, down_diff) where empty strings mean success.
-    fn verify(&self, candidate: &MigrationOutput, prior_migrations: &[Migration]) -> Result<(String, String), Error> {
+    /// Seed data is inserted before applying UP, so migrations that fail on
+    /// existing rows (e.g. a NOT NULL add without a default) surface here.
+    /// Data-preservation checks only run when the schema already matches, so
+    /// they are not muddied by an otherwise-wrong schema.
+    fn verify(
+        &self,
+        candidate: &MigrationOutput,
+        prior_migrations: &[Migration],
+        previous_array_columns: &schema::ArrayColumns,
+        desired_array_columns: &schema::ArrayColumns,
+    ) -> Result<VerifyOutcome, Error> {
         // DB-Left: run schema.sql directly (desired end state).
         let db_left = self.engine.create_ephemeral()?;
         let schema_sql =
             std::fs::read_to_string(&self.schema_path).map_err(|e| Error::Llm(format!("reading schema.sql: {e}")))?;
         self.engine.execute(&db_left, &schema_sql)?;
 
-        // DB-Right: replay prior migrations, then apply candidate up.
+        // DB-Right: replay prior migrations, seed data, then apply candidate up.
         let db_right = self.engine.create_ephemeral()?;
         for m in prior_migrations {
             self.engine.execute(&db_right, &m.up_sql)?;
         }
+        self.seed_database(&db_right, &candidate.seed_data, previous_array_columns)?;
         self.engine.execute_in_transaction(&db_right, &candidate.up_sql)?;
 
         // Compare up migration result.
@@ -402,6 +496,15 @@ impl<'a> AgentLoop<'a> {
         let after_up = self.engine.dump_schema(&db_right)?;
         let dialect = self.engine.dialect();
         let up_diff = engine::schema_diff(dialect.as_ref(), &desired, "schema.sql", &after_up, "migration result");
+
+        // Data-preservation check: surviving tables must match expected_after_up.
+        let up_data_issue = if up_diff.is_empty() {
+            let surviving: HashSet<String> = schema::table_names(dialect.as_ref(), &after_up).into_iter().collect();
+            let up_checks = seed::build_row_checks(&candidate.seed_data, seed::Direction::Up, desired_array_columns);
+            self.run_seed_checks(&db_right, &up_checks, &surviving)?
+        } else {
+            None
+        };
 
         // Verify down: apply down to db_right, compare with previous state.
         self.engine.execute_in_transaction(&db_right, &candidate.down_sql)?;
@@ -421,12 +524,78 @@ impl<'a> AgentLoop<'a> {
             "after rollback",
         );
 
+        // Data-preservation check: restored tables must match expected_after_down.
+        let down_data_issue = if down_diff.is_empty() {
+            let restored: HashSet<String> = schema::table_names(dialect.as_ref(), &after_down).into_iter().collect();
+            let down_checks =
+                seed::build_row_checks(&candidate.seed_data, seed::Direction::Down, previous_array_columns);
+            self.run_seed_checks(&db_right, &down_checks, &restored)?
+        } else {
+            None
+        };
+
         // Clean up.
         self.engine.drop_ephemeral(db_left)?;
         self.engine.drop_ephemeral(db_right)?;
         self.engine.drop_ephemeral(db_prev)?;
 
-        Ok((up_diff, down_diff))
+        Ok(VerifyOutcome {
+            up_diff,
+            down_diff,
+            up_data_issue,
+            down_data_issue,
+        })
+    }
+
+    /// Insert all seed rows into `db`, disabling foreign-key enforcement so
+    /// that insertion order across tables does not matter.
+    fn seed_database(
+        &self,
+        db: &engine::EphemeralDb,
+        seed_data: &std::collections::HashMap<String, tools::TableSeedData>,
+        array_columns: &schema::ArrayColumns,
+    ) -> Result<(), Error> {
+        let inserts = seed::build_insert_statements(seed_data, array_columns);
+        if inserts.is_empty() {
+            return Ok(());
+        }
+        self.engine
+            .execute(db, &format!("{}{inserts}", self.engine.fk_disable_prefix()))?;
+        Ok(())
+    }
+
+    /// Run seed data-preservation checks, returning the first mismatch found.
+    ///
+    /// Checks whose table is absent from `present` (e.g. dropped by the
+    /// migration) are skipped. Each check runs its `COUNT(*)` query and the
+    /// result is compared against the expected total or existence condition.
+    fn run_seed_checks(
+        &self,
+        db: &engine::EphemeralDb,
+        checks: &[seed::RowCheck],
+        present: &HashSet<String>,
+    ) -> Result<Option<String>, Error> {
+        for check in checks {
+            if !present.contains(check.table()) {
+                continue;
+            }
+            let actual = self.engine.count_query(db, check.count_sql())?;
+            match check {
+                seed::RowCheck::Total { table, count, .. } => {
+                    if actual as usize != *count {
+                        return Ok(Some(format!(
+                            "table `{table}`: expected {count} row(s) but found {actual}"
+                        )));
+                    }
+                }
+                seed::RowCheck::Exists { table, expected, .. } => {
+                    if actual == 0 {
+                        return Ok(Some(format!("table `{table}`: expected row not found: {expected}")));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -470,6 +639,17 @@ fn validate_seed_coverage(
     }
 
     issues
+}
+
+/// Append a data-preservation mismatch to an existing schema diff string.
+///
+/// Mismatches are folded into the diff so the agent's existing retry loop
+/// surfaces them to the LLM as feedback.
+fn append_data_issue(diff: &mut String, field: &str, msg: &str) {
+    if !diff.is_empty() {
+        diff.push('\n');
+    }
+    diff.push_str(&format!("Data preservation check failed ({field}):\n- {msg}"));
 }
 
 /// Extract the migration output from the shared slot, clearing it for reuse.
@@ -623,5 +803,154 @@ mod tests {
         let candidate = make_candidate(HashMap::new());
         let issues = validate_seed_coverage(&dialect, "", &candidate);
         assert!(issues.is_empty());
+    }
+
+    /// Create a SQLite db, create the table, and insert the seed rows for it
+    /// using the shared `seed` SQL builder. Returns the engine and db handle.
+    fn seeded_sqlite(
+        ddl: &str,
+        seed_data: &HashMap<String, TableSeedData>,
+    ) -> (crate::engine::sqlite::SqliteEngine, engine::EphemeralDb) {
+        let engine = crate::engine::sqlite::SqliteEngine;
+        let db = engine.create_ephemeral().expect("create");
+        engine.execute(&db, ddl).expect("create table");
+        let inserts = seed::build_insert_statements(seed_data, &schema::ArrayColumns::new());
+        engine.execute(&db, &inserts).expect("insert seed rows");
+        (engine, db)
+    }
+
+    /// Run all checks for a direction against a populated db, returning the
+    /// first mismatch message (or None). Mirrors `AgentLoop::run_seed_checks`
+    /// but without needing a full agent instance.
+    fn run_checks(
+        engine: &crate::engine::sqlite::SqliteEngine,
+        db: &engine::EphemeralDb,
+        seed_data: &HashMap<String, TableSeedData>,
+        present: &[&str],
+    ) -> Option<String> {
+        let present: HashSet<String> = present.iter().map(|s| s.to_string()).collect();
+        for check in seed::build_row_checks(seed_data, seed::Direction::Up, &schema::ArrayColumns::new()) {
+            if !present.contains(check.table()) {
+                continue;
+            }
+            let actual = engine.count_query(db, check.count_sql()).expect("count query");
+            match &check {
+                seed::RowCheck::Total { count, .. } if actual as usize != *count => {
+                    return Some(format!("total mismatch: expected {count} found {actual}"));
+                }
+                seed::RowCheck::Exists { expected, .. } if actual == 0 => {
+                    return Some(format!("missing: {expected}"));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn seed_with_expected(rows: Vec<tools::Row>, expected_up: Vec<tools::Row>) -> HashMap<String, TableSeedData> {
+        HashMap::from([(
+            "users".to_string(),
+            TableSeedData {
+                expected_after_down: rows.clone(),
+                rows,
+                expected_after_up: expected_up,
+            },
+        )])
+    }
+
+    #[test]
+    fn test_seed_checks_pass_when_data_preserved() {
+        let data = seed_with_expected(two_rows(), two_rows());
+        let (engine, db) = seeded_sqlite("CREATE TABLE users (id INTEGER, name TEXT);", &data);
+        let result = run_checks(&engine, &db, &data, &["users"]);
+        engine.drop_ephemeral(db).expect("drop");
+        assert!(result.is_none(), "expected match, got: {result:?}");
+    }
+
+    #[test]
+    fn test_seed_checks_detect_wrong_count() {
+        let mut expected = two_rows();
+        expected.push(HashMap::from([
+            ("id".into(), serde_json::json!(3)),
+            ("name".into(), serde_json::json!("c")),
+        ]));
+        let data = seed_with_expected(two_rows(), expected);
+        let (engine, db) = seeded_sqlite("CREATE TABLE users (id INTEGER, name TEXT);", &data);
+        let result = run_checks(&engine, &db, &data, &["users"]);
+        engine.drop_ephemeral(db).expect("drop");
+        assert!(result.expect("mismatch").contains("total mismatch"));
+    }
+
+    #[test]
+    fn test_seed_checks_detect_corrupted_value() {
+        // Same row count, but an expected value does not match what was stored.
+        let expected = vec![
+            HashMap::from([
+                ("id".into(), serde_json::json!(1)),
+                ("name".into(), serde_json::json!("a")),
+            ]),
+            HashMap::from([
+                ("id".into(), serde_json::json!(2)),
+                ("name".into(), serde_json::json!("WRONG")),
+            ]),
+        ];
+        let data = seed_with_expected(two_rows(), expected);
+        let (engine, db) = seeded_sqlite("CREATE TABLE users (id INTEGER, name TEXT);", &data);
+        let result = run_checks(&engine, &db, &data, &["users"]);
+        engine.drop_ephemeral(db).expect("drop");
+        assert!(result.expect("mismatch").contains("missing"));
+    }
+
+    #[test]
+    fn test_seed_checks_null_safe_match() {
+        // A NULL column value must match an expected JSON null via `IS NULL`.
+        let rows = vec![
+            HashMap::from([
+                ("id".into(), serde_json::json!(1)),
+                ("note".into(), serde_json::json!(null)),
+            ]),
+            HashMap::from([
+                ("id".into(), serde_json::json!(2)),
+                ("note".into(), serde_json::json!("x")),
+            ]),
+        ];
+        let data = HashMap::from([(
+            "users".to_string(),
+            TableSeedData {
+                expected_after_up: rows.clone(),
+                expected_after_down: rows.clone(),
+                rows,
+            },
+        )]);
+        let (engine, db) = seeded_sqlite("CREATE TABLE users (id INTEGER, note TEXT);", &data);
+        let result = run_checks(&engine, &db, &data, &["users"]);
+        engine.drop_ephemeral(db).expect("drop");
+        assert!(result.is_none(), "expected null-safe match, got: {result:?}");
+    }
+
+    #[test]
+    fn test_not_null_add_fails_against_seeded_rows() {
+        // The core gap: adding a NOT NULL column with no default must fail
+        // when existing rows are present. This is what seed insertion exposes.
+        let data = seed_with_expected(two_rows(), two_rows());
+        let (engine, db) = seeded_sqlite("CREATE TABLE users (id INTEGER, name TEXT);", &data);
+        let result = engine.execute_in_transaction(&db, "ALTER TABLE users ADD COLUMN email TEXT NOT NULL;");
+        engine.drop_ephemeral(db).expect("drop");
+        assert!(
+            result.is_err(),
+            "NOT NULL add without default should fail on populated table"
+        );
+    }
+
+    #[test]
+    fn test_append_data_issue_into_empty_and_nonempty() {
+        let mut empty = String::new();
+        append_data_issue(&mut empty, "expected_after_up", "oops");
+        assert_eq!(empty, "Data preservation check failed (expected_after_up):\n- oops");
+
+        let mut existing = String::from("--- a\n+++ b");
+        append_data_issue(&mut existing, "expected_after_down", "bad");
+        assert!(existing.starts_with("--- a\n+++ b\n"));
+        assert!(existing.contains("Data preservation check failed (expected_after_down)"));
     }
 }

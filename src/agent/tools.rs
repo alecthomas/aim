@@ -129,8 +129,8 @@ pub type MigrationSlot = Arc<Mutex<Option<MigrationOutput>>>;
 /// The result is stashed in a shared slot that the orchestrator reads.
 pub struct SubmitMigration {
     pub slot: MigrationSlot,
-    /// Number of tables in the previous schema that require seed data.
-    pub expected_table_count: usize,
+    /// Names of tables in the previous schema that require seed data.
+    pub required_tables: Vec<String>,
 }
 
 impl Tool for SubmitMigration {
@@ -152,13 +152,20 @@ impl Tool for SubmitMigration {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        if self.expected_table_count > 0 && args.seed_data.len() < self.expected_table_count {
+        let missing: Vec<&str> = self
+            .required_tables
+            .iter()
+            .filter(|t| !args.seed_data.contains_key(*t))
+            .map(String::as_str)
+            .collect();
+        if !missing.is_empty() {
             return Err(ToolError(format!(
-                "seed_data has {} tables but the previous schema has {}. \
-                 Provide seed data for ALL tables in the previous schema, \
-                 then call submit_migration again.",
-                args.seed_data.len(),
-                self.expected_table_count
+                "seed_data is missing entries for these previous-schema tables: {}. \
+                 seed_data MUST contain an entry for ALL {} previous-schema tables: {}. \
+                 Add the missing entries and call submit_migration again.",
+                missing.join(", "),
+                self.required_tables.len(),
+                self.required_tables.join(", "),
             )));
         }
         let mut slot = self.slot.lock().map_err(|e| ToolError(format!("lock poisoned: {e}")))?;
@@ -173,6 +180,82 @@ impl Tool for SubmitMigration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seed_for(tables: &[&str]) -> HashMap<String, TableSeedData> {
+        let row = || {
+            vec![
+                HashMap::from([("id".to_string(), serde_json::json!(1))]),
+                HashMap::from([("id".to_string(), serde_json::json!(2))]),
+            ]
+        };
+        tables
+            .iter()
+            .map(|t| {
+                (
+                    t.to_string(),
+                    TableSeedData {
+                        rows: row(),
+                        expected_after_up: row(),
+                        expected_after_down: row(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn candidate(seed_data: HashMap<String, TableSeedData>) -> MigrationOutput {
+        MigrationOutput {
+            up_sql: "SELECT 1;".into(),
+            down_sql: "SELECT 1;".into(),
+            description: "test".into(),
+            seed_data,
+        }
+    }
+
+    fn submit(required: &[&str]) -> SubmitMigration {
+        SubmitMigration {
+            slot: Arc::new(Mutex::new(None)),
+            required_tables: required.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_submit_rejects_missing_tables_and_names_them() {
+        let tool = submit(&["users", "orders"]);
+        let err = tool
+            .call(candidate(seed_for(&["users"])))
+            .await
+            .expect_err("should reject missing seed data");
+        let msg = err.to_string();
+        assert!(msg.contains("orders"), "error should name the missing table: {msg}");
+        assert!(
+            !msg.contains("users: "),
+            "present table should not be listed as missing: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_submit_accepts_all_required_tables() {
+        let tool = submit(&["users", "orders"]);
+        let result = tool.call(candidate(seed_for(&["users", "orders"]))).await;
+        assert!(result.is_ok(), "all tables covered should be accepted: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_submit_allows_extra_tables() {
+        // Extra entries (e.g. tables dropped by UP) are permitted as long as
+        // every required previous-schema table is present.
+        let tool = submit(&["users"]);
+        let result = tool.call(candidate(seed_for(&["users", "legacy"]))).await;
+        assert!(result.is_ok(), "extra seed tables should be allowed: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_submit_no_required_tables_allows_empty_seed() {
+        let tool = submit(&[]);
+        let result = tool.call(candidate(HashMap::new())).await;
+        assert!(result.is_ok(), "empty previous schema needs no seed data: {result:?}");
+    }
 
     #[test]
     fn test_migration_output_with_seed_data() {

@@ -369,6 +369,19 @@ impl DatabaseEngine for MysqlEngine {
         Ok(())
     }
 
+    fn count_query(&self, db: &EphemeralDb, sql: &str) -> Result<u64, Error> {
+        let container = self.ensure_container()?;
+        let out = self.run_query(&container, &db.id, sql)?;
+        let trimmed = out.trim();
+        trimmed
+            .parse::<u64>()
+            .map_err(|e| Error::Execution(format!("parsing count `{trimmed}`: {e}")))
+    }
+
+    fn fk_disable_prefix(&self) -> &str {
+        "SET FOREIGN_KEY_CHECKS=0;\n"
+    }
+
     fn dialect(&self) -> Box<dyn Dialect> {
         Box::new(MySqlDialect {})
     }

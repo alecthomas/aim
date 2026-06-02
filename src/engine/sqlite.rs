@@ -70,6 +70,14 @@ impl DatabaseEngine for SqliteEngine {
         Ok(parts.join(";\n\n"))
     }
 
+    fn count_query(&self, db: &EphemeralDb, sql: &str) -> Result<u64, Error> {
+        let conn = Self::open(db)?;
+        let count: i64 = conn
+            .query_row(sql, [], |row| row.get(0))
+            .map_err(|e| Error::Execution(format!("count query failed: {e}")))?;
+        Ok(count as u64)
+    }
+
     fn dialect(&self) -> Box<dyn Dialect> {
         Box::new(SQLiteDialect {})
     }

@@ -5,9 +5,16 @@
 //! This ensures schema comparisons are insensitive to column order and
 //! quoting style differences.
 
-use sqlparser::ast::{ObjectNamePart, Statement};
+use std::collections::{HashMap, HashSet};
+
+use sqlparser::ast::{DataType, ObjectNamePart, Statement};
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::Parser;
+
+/// Per-table set of column names that use an array type (e.g. PostgreSQL `TEXT[]`).
+///
+/// Keyed by table name; the value is the set of array-typed column names.
+pub type ArrayColumns = HashMap<String, HashSet<String>>;
 
 /// Normalize a DDL string for comparison.
 ///
@@ -90,6 +97,59 @@ pub fn table_names(dialect: &dyn Dialect, ddl: &str) -> Vec<String> {
         }
     }
     names
+}
+
+/// Identify array-typed columns per table in a DDL dump.
+///
+/// Only PostgreSQL has true array column types; for other dialects this
+/// returns an empty map because their DDL never parses to [`DataType::Array`].
+/// Used so seed values for array columns render as array literals (`'{...}'`)
+/// rather than JSON (`'[...]'`).
+pub fn array_columns(dialect: &dyn Dialect, ddl: &str) -> ArrayColumns {
+    let statements: Vec<&str> = ddl
+        .split(";\n\n")
+        .map(|s| s.trim().trim_end_matches(';').trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut result = ArrayColumns::new();
+    for sql in statements {
+        let Ok(parsed) = Parser::parse_sql(dialect, sql) else {
+            continue;
+        };
+        for stmt in parsed {
+            let Statement::CreateTable(ct) = stmt else {
+                continue;
+            };
+            let Some(table) = ct
+                .name
+                .0
+                .iter()
+                .filter_map(|part| match part {
+                    ObjectNamePart::Identifier(ident) => Some(ident.value.clone()),
+                    ObjectNamePart::Function(_) => None,
+                })
+                .next_back()
+            else {
+                continue;
+            };
+            let cols: HashSet<String> = ct
+                .columns
+                .iter()
+                .filter(|col| is_array_type(&col.data_type))
+                .map(|col| col.name.value.clone())
+                .collect();
+            if !cols.is_empty() {
+                result.insert(table, cols);
+            }
+        }
+    }
+    result
+}
+
+/// Whether a sqlparser data type is an array type (e.g. `text[]`, `int[]`).
+fn is_array_type(data_type: &DataType) -> bool {
+    matches!(data_type, DataType::Array(_))
 }
 
 /// Format SQL that sqlparser couldn't parse.
@@ -297,5 +357,34 @@ mod tests {
         let sql = "NOT VALID SQL {{{}}}";
         let normalized = normalize_ddl(&sqlite(), sql);
         assert_eq!(normalized, "NOT VALID SQL {{{}}}");
+    }
+
+    #[test]
+    fn test_array_columns_postgres() {
+        use sqlparser::dialect::PostgreSqlDialect;
+        let pg = PostgreSqlDialect {};
+        let ddl = "CREATE TABLE acl (id integer, args text[], tags varchar(10)[], reason text)";
+        let cols = array_columns(&pg, ddl);
+        let acl = cols.get("acl").expect("acl table");
+        assert!(acl.contains("args"), "args should be array: {acl:?}");
+        assert!(acl.contains("tags"), "tags should be array: {acl:?}");
+        assert!(!acl.contains("reason"), "reason is not an array");
+        assert!(!acl.contains("id"), "id is not an array");
+    }
+
+    #[test]
+    fn test_array_columns_none() {
+        let ddl = "CREATE TABLE users (id INTEGER, name TEXT)";
+        let cols = array_columns(&sqlite(), ddl);
+        assert!(cols.is_empty(), "no array columns expected: {cols:?}");
+    }
+
+    #[test]
+    fn test_array_columns_schema_qualified() {
+        use sqlparser::dialect::PostgreSqlDialect;
+        let pg = PostgreSqlDialect {};
+        let ddl = "CREATE TABLE public.acl (id integer, args text[])";
+        let cols = array_columns(&pg, ddl);
+        assert!(cols.get("acl").is_some_and(|c| c.contains("args")), "{cols:?}");
     }
 }

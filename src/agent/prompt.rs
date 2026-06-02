@@ -40,7 +40,7 @@ The seed_data field is a JSON object keyed by table name. For EVERY table that e
 - `expected_after_up`: what those rows should look like after UP is applied. Reflect any column additions (with their DEFAULT values), column removals, renames, or type changes.
 - `expected_after_down`: what the rows should look like after DOWN is applied. This should match `rows` exactly.
 
-Each row is a JSON object mapping column names to JSON values. Use JSON types directly: strings as JSON strings, numbers as JSON numbers, booleans as JSON booleans, null as JSON null. Do NOT use SQL literal syntax.
+Each row is a JSON object mapping column names to JSON values. Use JSON types directly: strings as JSON strings, numbers as JSON numbers, booleans as JSON booleans, null as JSON null. Do NOT use SQL literal syntax. For array-typed columns, supply a JSON array (e.g. ["a", "b"], or [] for empty) — it is converted to the database's native array syntax automatically; do NOT encode the array as a string.
 
 IMPORTANT:
 - Respect foreign key dependencies: list parent tables before child tables.

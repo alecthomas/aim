@@ -85,6 +85,21 @@ pub trait DatabaseEngine: Send + Sync {
     /// that is handled by `schema_diff`.
     fn dump_schema(&self, db: &EphemeralDb) -> Result<String, Error>;
 
+    /// Execute a `SELECT COUNT(*)`-style query and return the scalar count.
+    ///
+    /// Used by seed-data verification to check that migrations preserve
+    /// existing rows.
+    fn count_query(&self, db: &EphemeralDb, sql: &str) -> Result<u64, Error>;
+
+    /// SQL prepended to a seed-insert batch to disable foreign-key
+    /// enforcement, so seed rows can be inserted regardless of order.
+    ///
+    /// The default is empty; SQLite disables foreign keys inside `execute`,
+    /// while PostgreSQL and MySQL override this.
+    fn fk_disable_prefix(&self) -> &str {
+        ""
+    }
+
     /// Tear down an ephemeral database and clean up resources.
     fn drop_ephemeral(&self, db: EphemeralDb) -> Result<(), Error>;
 
