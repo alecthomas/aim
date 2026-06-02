@@ -11,12 +11,17 @@ Call `read_previous_schema` and `read_schema`, then call `submit_migration` with
 SQL dialect: {dialect}
 
 ## Migration Rules
-- Only DDL statements (CREATE, ALTER, DROP, etc.) in up_sql and down_sql.
+- Use DDL statements (CREATE, ALTER, DROP, etc.) in up_sql and down_sql.
+- DML statements (UPDATE, INSERT, DELETE) are allowed when needed to transform
+  existing data during a migration (e.g. mapping old enum values to new ones).
 - UP applied to previous schema must produce exactly the desired schema.
 - DOWN applied after UP must restore exactly the previous schema.
 - Do NOT include transaction wrappers (BEGIN/COMMIT).
 - Column order does not matter. Never recreate a table just to reorder columns.
 - Use ALTER TABLE ADD COLUMN when adding columns.
+- Migrations MUST be fully automated. NEVER include comments or instructions
+  requiring manual intervention. If data needs to be transformed, include the
+  necessary DML (UPDATE, INSERT, DELETE) statements directly in the migration.
 
 ## Data Loss Warnings
 Add a `-- WARNING: <description>` SQL comment before any statement that could cause
