@@ -182,7 +182,7 @@ impl Spinner {
                 if idle_secs >= 5 {
                     let stdout = std::io::stdout();
                     let mut handle = stdout.lock();
-                    let msg = format!("  {} {idle_secs}s...", "waiting".dim());
+                    let msg = format!("  {} {idle_secs}s...", "thinking".dim());
                     let _ = write!(handle, "\r\x1b[2K{msg}");
                     let _ = handle.flush();
                     showing = true;
