@@ -99,7 +99,8 @@ pub struct TableSeedData {
     /// column removals, renames, or type changes.
     pub expected_after_up: Vec<Row>,
     /// Expected rows after the DOWN migration restores the previous state.
-    /// Typically identical to `rows`.
+    /// Typically identical to `rows`. Omitted when down migrations are disabled.
+    #[serde(default)]
     pub expected_after_down: Vec<Row>,
 }
 
@@ -109,6 +110,8 @@ pub struct MigrationOutput {
     /// SQL statements for the up (apply) migration.
     pub up_sql: String,
     /// SQL statements for the down (rollback) migration.
+    /// Omitted when down migrations are disabled.
+    #[serde(default)]
     pub down_sql: String,
     /// Short description for the migration filename (snake_case, no spaces).
     pub description: String,
@@ -131,6 +134,9 @@ pub struct SubmitMigration {
     pub slot: MigrationSlot,
     /// Names of tables in the previous schema that require seed data.
     pub required_tables: Vec<String>,
+    /// When `true`, no down migration is expected; any submitted `down_sql`
+    /// is discarded.
+    pub no_down: bool,
 }
 
 impl Tool for SubmitMigration {
@@ -140,18 +146,29 @@ impl Tool for SubmitMigration {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let fields = if self.no_down {
+            "up_sql, description, and seed_data (do not provide down_sql)"
+        } else {
+            "up_sql, down_sql, description, and seed_data"
+        };
         ToolDefinition {
             name: "submit_migration".into(),
-            description: "Submit the generated migration. You MUST call this tool to deliver \
-                          your result. Do not respond with JSON in your message — call this tool \
-                          with up_sql, down_sql, description, and seed_data."
-                .into(),
+            description: format!(
+                "Submit the generated migration. You MUST call this tool to deliver \
+                 your result. Do not respond with JSON in your message — call this tool \
+                 with {fields}."
+            ),
             parameters: serde_json::to_value(schemars::schema_for!(MigrationOutput))
                 .expect("schema serialization should not fail"),
         }
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(&self, mut args: Self::Args) -> Result<Self::Output, Self::Error> {
+        // Down migrations can destroy data on rollback, so when disabled we drop
+        // any down_sql the model supplied rather than persisting it.
+        if self.no_down {
+            args.down_sql.clear();
+        }
         let missing: Vec<&str> = self
             .required_tables
             .iter()
@@ -216,6 +233,7 @@ mod tests {
         SubmitMigration {
             slot: Arc::new(Mutex::new(None)),
             required_tables: required.iter().map(|s| s.to_string()).collect(),
+            no_down: false,
         }
     }
 
@@ -255,6 +273,31 @@ mod tests {
         let tool = submit(&[]);
         let result = tool.call(candidate(HashMap::new())).await;
         assert!(result.is_ok(), "empty previous schema needs no seed data: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_submit_no_down_discards_down_sql() {
+        let slot = Arc::new(Mutex::new(None));
+        let tool = SubmitMigration {
+            slot: slot.clone(),
+            required_tables: Vec::new(),
+            no_down: true,
+        };
+        let mut migration = candidate(HashMap::new());
+        migration.down_sql = "DROP TABLE t;".into();
+        tool.call(migration).await.expect("submit should succeed");
+        let stored = slot.lock().expect("lock").take().expect("migration stored");
+        assert!(stored.down_sql.is_empty(), "down_sql must be discarded when no_down");
+    }
+
+    #[test]
+    fn test_migration_output_without_down_sql() {
+        let json = serde_json::json!({
+            "up_sql": "CREATE TABLE t (id INT);",
+            "description": "create_t"
+        });
+        let output: MigrationOutput = serde_json::from_value(json).expect("deserialization should succeed");
+        assert!(output.down_sql.is_empty());
     }
 
     #[test]

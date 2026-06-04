@@ -58,6 +58,10 @@ impl MigrationFormat for Sqlx {
                 Direction::Up => &migration.up_sql,
                 Direction::Down => &migration.down_sql,
             };
+            // Skip the down file entirely when no rollback was generated.
+            if direction == Direction::Down && sql.is_empty() {
+                continue;
+            }
             let filename = format!("{}_{}.{direction}.sql", migration.sequence, migration.description);
             std::fs::write(dir.join(filename), wrap_sql(sql, prefix, suffix))?;
         }
@@ -73,7 +77,11 @@ impl MigrationFormat for Sqlx {
     }
 
     fn describe_written(&self, migration: &Migration) -> String {
-        format!("{}_{}.{{up,down}}.sql", migration.sequence, migration.description)
+        if migration.down_sql.is_empty() {
+            format!("{}_{}.up.sql", migration.sequence, migration.description)
+        } else {
+            format!("{}_{}.{{up,down}}.sql", migration.sequence, migration.description)
+        }
     }
 }
 
@@ -128,5 +136,27 @@ mod tests {
         assert_eq!(migrations.len(), 1);
         assert_eq!(migrations[0].up_sql, "CREATE TABLE users (id INT);");
         assert_eq!(migrations[0].down_sql, "DROP TABLE users;");
+    }
+
+    #[test]
+    fn test_write_without_down_omits_down_file() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let fmt = Sqlx;
+        let m = Migration {
+            sequence: 20230101120000,
+            description: "create_users".to_owned(),
+            up_sql: "CREATE TABLE users (id INT);".to_owned(),
+            down_sql: String::new(),
+        };
+
+        fmt.write(dir.path(), &m, "", "").expect("write");
+
+        assert!(dir.path().join("20230101120000_create_users.up.sql").exists());
+        assert!(!dir.path().join("20230101120000_create_users.down.sql").exists());
+        assert_eq!(fmt.describe_written(&m), "20230101120000_create_users.up.sql");
+
+        let migrations = fmt.list(dir.path()).expect("list");
+        assert_eq!(migrations.len(), 1);
+        assert_eq!(migrations[0].down_sql, "");
     }
 }

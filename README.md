@@ -24,8 +24,8 @@ You maintain a single `schema.sql` describing your desired database schema. AIM 
 
 1. **Snapshot** — AIM creates two ephemeral databases: one by loading `schema.sql` (the desired state), and one by replaying all existing migrations (the current state). It dumps a stable, normalized DDL representation from each.
 2. **Diff** — AIM compares the two DDL snapshots to determine what changed.
-3. **Generate** — An LLM reads both schemas and produces UP and DOWN SQL migration statements.
-4. **Verify** — AIM applies the generated UP migration to a fresh ephemeral database and checks that the result exactly matches `schema.sql`. It then applies DOWN and checks that the original state is restored. If either check fails, AIM feeds the diff back to the LLM and retries.
+3. **Generate** — An LLM reads both schemas and produces UP and DOWN SQL migration statements (DOWN is skipped when `no_down` is set).
+4. **Verify** — AIM applies the generated UP migration to a fresh ephemeral database and checks that the result exactly matches `schema.sql`. It then applies DOWN and checks that the original state is restored. If either check fails, AIM feeds the diff back to the LLM and retries. When `no_down` is set, only the UP migration is generated and verified.
 5. **Write** — Once verified, the migration files are written to disk in your chosen format.
 
 ## Supported databases
@@ -100,11 +100,14 @@ migrations = "migrations"
 max_retries = 3
 model = "anthropic-claude-haiku-4-5-20251001"
 context = "Use IF NOT EXISTS for all CREATE TABLE statements."
+no_down = false
 ```
 
 All fields except `engine` and `model` have defaults. The `context` field is optional and appends extra instructions to the LLM prompt.
 
-Global flags (`--engine`, `--model`, `--format`, `--schema`, `--migrations`, `--max-retries`) override config file values.
+Set `no_down = true` to generate migrations without a DOWN (rollback) section. Rollbacks are easy to get wrong in ways that silently destroy data (for example, an UP that adds an enum value paired with a DOWN that drops it). With `no_down`, only the UP migration is generated, verified, and written, and `validate` checks only that each UP applies cleanly through the full history.
+
+Global flags (`--engine`, `--model`, `--format`, `--schema`, `--migrations`, `--max-retries`, `--no-down`) override config file values.
 
 ## Supported LLM providers
 

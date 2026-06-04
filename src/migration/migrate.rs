@@ -35,7 +35,11 @@ impl MigrationFormat for Migrate {
             let down_path = dir.join(format!("{prefix}_{description}.down.sql"));
 
             let up_sql = std::fs::read_to_string(&up_path)?;
-            let down_sql = std::fs::read_to_string(&down_path)?;
+            let down_sql = if down_path.exists() {
+                std::fs::read_to_string(&down_path)?
+            } else {
+                String::new()
+            };
 
             migrations.push(Migration {
                 sequence: *seq,
@@ -56,6 +60,10 @@ impl MigrationFormat for Migrate {
                 Direction::Up => &migration.up_sql,
                 Direction::Down => &migration.down_sql,
             };
+            // Skip the down file entirely when no rollback was generated.
+            if direction == Direction::Down && sql.is_empty() {
+                continue;
+            }
             let filename = format!("{:06}_{}.{direction}.sql", migration.sequence, migration.description);
             let path = dir.join(filename);
             std::fs::write(&path, wrap_sql(sql, prefix, suffix))?;
@@ -70,7 +78,11 @@ impl MigrationFormat for Migrate {
     }
 
     fn describe_written(&self, migration: &Migration) -> String {
-        format!("{:06}_{}.{{up,down}}.sql", migration.sequence, migration.description)
+        if migration.down_sql.is_empty() {
+            format!("{:06}_{}.up.sql", migration.sequence, migration.description)
+        } else {
+            format!("{:06}_{}.{{up,down}}.sql", migration.sequence, migration.description)
+        }
     }
 }
 
@@ -136,6 +148,28 @@ mod tests {
     }
 
     #[test]
+    fn test_write_without_down_omits_down_file() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let fmt = Migrate;
+        let m = Migration {
+            sequence: 1,
+            description: "initial".to_owned(),
+            up_sql: "CREATE TABLE users (id INT);".to_owned(),
+            down_sql: String::new(),
+        };
+
+        fmt.write(dir.path(), &m, "", "").expect("write migration");
+
+        assert!(dir.path().join("000001_initial.up.sql").exists());
+        assert!(!dir.path().join("000001_initial.down.sql").exists());
+        assert_eq!(fmt.describe_written(&m), "000001_initial.up.sql");
+
+        let migrations = fmt.list(dir.path()).expect("list migrations");
+        assert_eq!(migrations.len(), 1);
+        assert_eq!(migrations[0].down_sql, "");
+    }
+
+    #[test]
     fn test_next_sequence_empty() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let fmt = Migrate;
@@ -162,8 +196,8 @@ mod tests {
         let m = Migration {
             sequence: 1,
             description: "initial".to_owned(),
-            up_sql: String::new(),
-            down_sql: String::new(),
+            up_sql: "CREATE TABLE users (id INT);".to_owned(),
+            down_sql: "DROP TABLE users;".to_owned(),
         };
         assert_eq!(fmt.describe_written(&m), "000001_initial.{up,down}.sql");
     }

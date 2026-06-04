@@ -49,6 +49,10 @@ struct Cli {
     /// Extra context to include in the LLM prompt.
     #[arg(long, global = true)]
     context: Option<String>,
+
+    /// Generate migrations without a down (rollback) section.
+    #[arg(long, global = true)]
+    no_down: bool,
 }
 
 #[derive(Subcommand)]
@@ -87,6 +91,7 @@ impl Cli {
             max_tokens: self.max_tokens,
             model: self.model.clone(),
             context: self.context.clone(),
+            no_down: self.no_down.then_some(true),
         }
     }
 }
@@ -289,6 +294,7 @@ async fn cmd_generate(cli: &Cli, dry_run: bool) -> Result<(), Box<dyn std::error
         config.max_retries,
         config.max_tokens,
         config.context.clone(),
+        config.no_down,
     );
 
     let result = match agent_loop.run(&prior, next_seq, &diff).await {
@@ -325,18 +331,22 @@ async fn cmd_generate(cli: &Cli, dry_run: bool) -> Result<(), Box<dyn std::error
         println!("\n-- SEED SELECT (after up) --");
         display::highlight_sql(&selects_up);
 
-        let selects_down =
-            seed::build_select_statements(&result.seed_data, seed::Direction::Down, &result.previous_array_columns);
-        println!("\n-- SEED SELECT (after down) --");
-        display::highlight_sql(&selects_down);
+        if !config.no_down {
+            let selects_down =
+                seed::build_select_statements(&result.seed_data, seed::Direction::Down, &result.previous_array_columns);
+            println!("\n-- SEED SELECT (after down) --");
+            display::highlight_sql(&selects_down);
+        }
     }
 
     let prefix = engine.migration_prefix();
     let suffix = engine.migration_suffix();
     println!("\n-- UP --");
     display::highlight_sql(&format!("{prefix}{}\n{suffix}", m.up_sql));
-    println!("\n-- DOWN --");
-    display::highlight_sql(&format!("{prefix}{}\n{suffix}", m.down_sql));
+    if !m.down_sql.is_empty() {
+        println!("\n-- DOWN --");
+        display::highlight_sql(&format!("{prefix}{}\n{suffix}", m.down_sql));
+    }
 
     Ok(())
 }
@@ -396,29 +406,39 @@ fn cmd_validate(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+        // Migrations generated with `no_down` have no rollback SQL, so the
+        // DOWN and UP+DOWN+UP checks don't apply — only the UP chain is validated.
+        let has_down = !migration.down_sql.trim().is_empty();
+
         // DOWN test
-        let down_ok = match engine.execute_in_transaction(&test_db, &migration.down_sql) {
-            Ok(()) => {
-                let schema = engine.dump_schema(&test_db)?;
-                let diff = engine::schema_diff(dialect.as_ref(), &prev_schema, "expected", &schema, "after down");
-                if diff.is_empty() {
-                    true
-                } else {
+        let down_ok = if !has_down {
+            true
+        } else {
+            match engine.execute_in_transaction(&test_db, &migration.down_sql) {
+                Ok(()) => {
+                    let schema = engine.dump_schema(&test_db)?;
+                    let diff = engine::schema_diff(dialect.as_ref(), &prev_schema, "expected", &schema, "after down");
+                    if diff.is_empty() {
+                        true
+                    } else {
+                        println!();
+                        Output::error("DOWN schema mismatch");
+                        Output::diff("down", &diff);
+                        false
+                    }
+                }
+                Err(e) => {
                     println!();
-                    Output::error("DOWN schema mismatch");
-                    Output::diff("down", &diff);
+                    Output::error(&format!("DOWN failed: {e}"));
                     false
                 }
-            }
-            Err(e) => {
-                println!();
-                Output::error(&format!("DOWN failed: {e}"));
-                false
             }
         };
 
         // UP+DOWN+UP idempotency test
-        let idem_ok = if down_ok {
+        let idem_ok = if !has_down {
+            true
+        } else if down_ok {
             match engine.execute_in_transaction(&test_db, &migration.up_sql) {
                 Ok(()) => {
                     let schema = engine.dump_schema(&test_db)?;
@@ -451,7 +471,11 @@ fn cmd_validate(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         engine.drop_ephemeral(test_db)?;
 
         if up_ok && down_ok && idem_ok {
-            println!("{}", "ok".green().bold());
+            if has_down {
+                println!("{}", "ok".green().bold());
+            } else {
+                println!("{} {}", "ok".green().bold(), "(up only)".dim());
+            }
         } else {
             failures += 1;
         }

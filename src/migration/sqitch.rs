@@ -62,10 +62,13 @@ impl MigrationFormat for Sqitch {
             deploy_dir.join(format!("{name}.sql")),
             wrap_sql(&migration.up_sql, prefix, suffix),
         )?;
-        std::fs::write(
-            revert_dir.join(format!("{name}.sql")),
-            wrap_sql(&migration.down_sql, prefix, suffix),
-        )?;
+        // Skip the revert script entirely when no rollback was generated.
+        if !migration.down_sql.is_empty() {
+            std::fs::write(
+                revert_dir.join(format!("{name}.sql")),
+                wrap_sql(&migration.down_sql, prefix, suffix),
+            )?;
+        }
         // Verify script is empty — aim doesn't generate verification SQL.
         std::fs::write(verify_dir.join(format!("{name}.sql")), "")?;
 
@@ -93,7 +96,11 @@ impl MigrationFormat for Sqitch {
 
     fn describe_written(&self, migration: &Migration) -> String {
         let name = &migration.description;
-        format!("deploy/{name}.sql, revert/{name}.sql, verify/{name}.sql")
+        if migration.down_sql.is_empty() {
+            format!("deploy/{name}.sql, verify/{name}.sql")
+        } else {
+            format!("deploy/{name}.sql, revert/{name}.sql, verify/{name}.sql")
+        }
     }
 }
 
@@ -148,5 +155,29 @@ mod tests {
         assert_eq!(migrations.len(), 1);
         assert_eq!(migrations[0].up_sql, "CREATE TABLE users (id INT);");
         assert_eq!(migrations[0].down_sql, "DROP TABLE users;");
+    }
+
+    #[test]
+    fn test_write_without_down_omits_revert() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let fmt = Sqitch;
+        let m = Migration {
+            sequence: 1,
+            description: "create_users".to_owned(),
+            up_sql: "CREATE TABLE users (id INT);".to_owned(),
+            down_sql: String::new(),
+        };
+
+        fmt.write(dir.path(), &m, "", "").expect("write");
+
+        assert!(dir.path().join("deploy/create_users.sql").exists());
+        assert!(!dir.path().join("revert/create_users.sql").exists());
+        assert_eq!(
+            fmt.describe_written(&m),
+            "deploy/create_users.sql, verify/create_users.sql"
+        );
+
+        let migrations = fmt.list(dir.path()).expect("list");
+        assert_eq!(migrations[0].down_sql, "");
     }
 }

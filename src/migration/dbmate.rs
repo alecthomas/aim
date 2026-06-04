@@ -47,8 +47,13 @@ impl MigrationFormat for Dbmate {
 
         let filename = format!("{}_{}.sql", migration.sequence, migration.description);
         let up_body = wrap_sql(&migration.up_sql, prefix, suffix);
-        let down_body = wrap_sql(&migration.down_sql, prefix, suffix);
-        let content = format!("-- migrate:up\n{up_body}\n-- migrate:down\n{down_body}\n");
+        // Omit the down section entirely when no rollback was generated.
+        let content = if migration.down_sql.is_empty() {
+            format!("-- migrate:up\n{up_body}\n")
+        } else {
+            let down_body = wrap_sql(&migration.down_sql, prefix, suffix);
+            format!("-- migrate:up\n{up_body}\n-- migrate:down\n{down_body}\n")
+        };
 
         std::fs::write(dir.join(filename), content)?;
         Ok(())
@@ -143,5 +148,25 @@ mod tests {
         assert_eq!(migrations.len(), 1);
         assert_eq!(migrations[0].up_sql, "CREATE TABLE users (id INT);");
         assert_eq!(migrations[0].down_sql, "DROP TABLE users;");
+    }
+
+    #[test]
+    fn test_write_without_down_omits_down_section() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let fmt = Dbmate;
+        let m = Migration {
+            sequence: 20230101120000,
+            description: "create_users".to_owned(),
+            up_sql: "CREATE TABLE users (id INT);".to_owned(),
+            down_sql: String::new(),
+        };
+
+        fmt.write(dir.path(), &m, "", "").expect("write");
+        let content = std::fs::read_to_string(dir.path().join("20230101120000_create_users.sql")).expect("read");
+        assert!(content.contains("-- migrate:up"));
+        assert!(!content.contains("-- migrate:down"));
+
+        let migrations = fmt.list(dir.path()).expect("list");
+        assert_eq!(migrations[0].down_sql, "");
     }
 }

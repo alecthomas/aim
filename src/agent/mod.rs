@@ -118,6 +118,8 @@ pub struct AgentLoop<'a> {
     max_retries: usize,
     max_tokens: u64,
     context: Option<String>,
+    /// When `true`, no down (rollback) migration is generated or verified.
+    no_down: bool,
 }
 
 impl<'a> AgentLoop<'a> {
@@ -128,6 +130,7 @@ impl<'a> AgentLoop<'a> {
         max_retries: usize,
         max_tokens: u64,
         context: Option<String>,
+        no_down: bool,
     ) -> Self {
         Self {
             engine,
@@ -136,6 +139,7 @@ impl<'a> AgentLoop<'a> {
             max_retries,
             max_tokens,
             context,
+            no_down,
         }
     }
 
@@ -229,7 +233,7 @@ impl<'a> AgentLoop<'a> {
             return Err(Error::NoChanges);
         }
 
-        let preamble = prompt::system_prompt(self.engine.dialect_description(), self.context.as_deref());
+        let preamble = prompt::system_prompt(self.engine.dialect_description(), self.context.as_deref(), self.no_down);
 
         // Shared slot where the submit_migration tool deposits its result.
         let slot: tools::MigrationSlot = Arc::new(Mutex::new(None));
@@ -258,6 +262,7 @@ impl<'a> AgentLoop<'a> {
             .tool(tools::SubmitMigration {
                 slot: slot.clone(),
                 required_tables: previous_tables.clone(),
+                no_down: self.no_down,
             })
             .build();
 
@@ -296,7 +301,7 @@ impl<'a> AgentLoop<'a> {
             println!();
             Output::phase("Verifying migration...");
 
-            let seed_issues = validate_seed_coverage(dialect.as_ref(), &previous_ddl, &candidate);
+            let seed_issues = validate_seed_coverage(dialect.as_ref(), &previous_ddl, &candidate, self.no_down);
             if !seed_issues.is_empty() {
                 let msg = format!(
                     "Seed data validation failed:\n{}",
@@ -405,7 +410,7 @@ impl<'a> AgentLoop<'a> {
             if outcome.up_diff.is_empty() {
                 Output::success("up migration verified");
             }
-            if outcome.down_diff.is_empty() {
+            if !self.no_down && outcome.down_diff.is_empty() {
                 Output::success("down migration verified");
             }
 
@@ -419,7 +424,12 @@ impl<'a> AgentLoop<'a> {
             // Only claim preservation when there was seed data and both
             // directions actually ran their data checks (i.e. schemas matched).
             if !candidate.seed_data.is_empty() && outcome.is_clean() {
-                Output::success("seed data preserved across up and down migrations");
+                let scope = if self.no_down {
+                    "the up migration"
+                } else {
+                    "up and down migrations"
+                };
+                Output::success(&format!("seed data preserved across {scope}"));
             }
 
             if outcome.is_clean() {
@@ -546,37 +556,45 @@ impl<'a> AgentLoop<'a> {
         };
 
         // Verify down: apply down to db_right, compare with previous state.
-        self.engine.execute_in_transaction(&db_right, &candidate.down_sql)?;
-
-        let db_prev = self.engine.create_ephemeral()?;
-        for m in prior_migrations {
-            self.engine.execute(&db_prev, &m.up_sql)?;
-        }
-
-        let prev_schema = self.engine.dump_schema(&db_prev)?;
-        let after_down = self.engine.dump_schema(&db_right)?;
-        let down_diff = engine::schema_diff(
-            dialect.as_ref(),
-            &prev_schema,
-            "previous state",
-            &after_down,
-            "after rollback",
-        );
-
-        // Data-preservation check: restored tables must match expected_after_down.
-        let down_data_issue = if down_diff.is_empty() {
-            let restored: HashSet<String> = schema::table_names(dialect.as_ref(), &after_down).into_iter().collect();
-            let down_checks =
-                seed::build_row_checks(&candidate.seed_data, seed::Direction::Down, previous_array_columns);
-            self.run_seed_checks(&db_right, &down_checks, &restored)?
+        // Skipped entirely when down migrations are disabled.
+        let (down_diff, down_data_issue) = if self.no_down {
+            (String::new(), None)
         } else {
-            None
+            self.engine.execute_in_transaction(&db_right, &candidate.down_sql)?;
+
+            let db_prev = self.engine.create_ephemeral()?;
+            for m in prior_migrations {
+                self.engine.execute(&db_prev, &m.up_sql)?;
+            }
+
+            let prev_schema = self.engine.dump_schema(&db_prev)?;
+            let after_down = self.engine.dump_schema(&db_right)?;
+            let down_diff = engine::schema_diff(
+                dialect.as_ref(),
+                &prev_schema,
+                "previous state",
+                &after_down,
+                "after rollback",
+            );
+
+            // Data-preservation check: restored tables must match expected_after_down.
+            let down_data_issue = if down_diff.is_empty() {
+                let restored: HashSet<String> =
+                    schema::table_names(dialect.as_ref(), &after_down).into_iter().collect();
+                let down_checks =
+                    seed::build_row_checks(&candidate.seed_data, seed::Direction::Down, previous_array_columns);
+                self.run_seed_checks(&db_right, &down_checks, &restored)?
+            } else {
+                None
+            };
+
+            self.engine.drop_ephemeral(db_prev)?;
+            (down_diff, down_data_issue)
         };
 
         // Clean up.
         self.engine.drop_ephemeral(db_left)?;
         self.engine.drop_ephemeral(db_right)?;
-        self.engine.drop_ephemeral(db_prev)?;
 
         Ok(VerifyOutcome {
             up_diff,
@@ -644,11 +662,14 @@ impl<'a> AgentLoop<'a> {
 /// with valid seed data. Checks that:
 /// - every table in the previous DDL has a `seed_data` entry
 /// - each entry has at least 2 rows
-/// - `expected_after_up` and `expected_after_down` have matching row counts
+/// - `expected_after_up` has a matching row count
+/// - `expected_after_down` has a matching row count (skipped when `no_down`,
+///   since no down migration is generated or verified)
 fn validate_seed_coverage(
     dialect: &dyn sqlparser::dialect::Dialect,
     previous_ddl: &str,
     candidate: &MigrationOutput,
+    no_down: bool,
 ) -> Vec<String> {
     let tables = schema::table_names(dialect, previous_ddl);
     let mut issues = Vec::new();
@@ -667,7 +688,7 @@ fn validate_seed_coverage(
                         seed.expected_after_up.len()
                     ));
                 }
-                if seed.expected_after_down.len() != row_count {
+                if !no_down && seed.expected_after_down.len() != row_count {
                     issues.push(format!(
                         "table `{table}`: expected_after_down has {} rows but rows has {row_count}",
                         seed.expected_after_down.len()
@@ -868,7 +889,7 @@ mod tests {
                 ]),
             ),
         ]));
-        let issues = validate_seed_coverage(&dialect, ddl, &candidate);
+        let issues = validate_seed_coverage(&dialect, ddl, &candidate, false);
         assert!(issues.is_empty(), "expected no issues, got: {issues:?}");
     }
 
@@ -877,7 +898,7 @@ mod tests {
         let ddl = "CREATE TABLE users (id INTEGER);\n\nCREATE TABLE groups (id INTEGER)";
         let dialect = sqlparser::dialect::SQLiteDialect {};
         let candidate = make_candidate(HashMap::from([("users".into(), make_seed(two_rows()))]));
-        let issues = validate_seed_coverage(&dialect, ddl, &candidate);
+        let issues = validate_seed_coverage(&dialect, ddl, &candidate, false);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].contains("groups"), "should mention groups: {}", issues[0]);
     }
@@ -888,7 +909,7 @@ mod tests {
         let dialect = sqlparser::dialect::SQLiteDialect {};
         let one_row = vec![HashMap::from([("id".into(), serde_json::json!(1))])];
         let candidate = make_candidate(HashMap::from([("users".into(), make_seed(one_row))]));
-        let issues = validate_seed_coverage(&dialect, ddl, &candidate);
+        let issues = validate_seed_coverage(&dialect, ddl, &candidate, false);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].contains("at least 2"), "{}", issues[0]);
     }
@@ -905,16 +926,40 @@ mod tests {
                 expected_after_down: two_rows(),
             },
         )]));
-        let issues = validate_seed_coverage(&dialect, ddl, &candidate);
+        let issues = validate_seed_coverage(&dialect, ddl, &candidate, false);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].contains("expected_after_up"), "{}", issues[0]);
+    }
+
+    #[test]
+    fn test_validate_seed_coverage_no_down_skips_expected_after_down() {
+        let ddl = "CREATE TABLE users (id INTEGER)";
+        let dialect = sqlparser::dialect::SQLiteDialect {};
+        // expected_after_down is empty, as the model omits it when no_down is set.
+        let candidate = make_candidate(HashMap::from([(
+            "users".into(),
+            TableSeedData {
+                rows: two_rows(),
+                expected_after_up: two_rows(),
+                expected_after_down: Vec::new(),
+            },
+        )]));
+        assert!(
+            validate_seed_coverage(&dialect, ddl, &candidate, true).is_empty(),
+            "no_down must skip the expected_after_down check"
+        );
+        assert_eq!(
+            validate_seed_coverage(&dialect, ddl, &candidate, false).len(),
+            1,
+            "with down enabled the empty expected_after_down is an issue"
+        );
     }
 
     #[test]
     fn test_validate_seed_coverage_empty_ddl() {
         let dialect = sqlparser::dialect::SQLiteDialect {};
         let candidate = make_candidate(HashMap::new());
-        let issues = validate_seed_coverage(&dialect, "", &candidate);
+        let issues = validate_seed_coverage(&dialect, "", &candidate, false);
         assert!(issues.is_empty());
     }
 

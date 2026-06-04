@@ -250,6 +250,8 @@ struct FileConfig {
     model: Option<String>,
     /// Extra context to include in the LLM prompt.
     context: Option<String>,
+    /// Disable generation of down (rollback) migrations.
+    no_down: Option<bool>,
 }
 
 /// Resolved configuration used at runtime.
@@ -263,6 +265,8 @@ pub struct Config {
     pub max_tokens: u64,
     pub model: Option<ModelSpec>,
     pub context: Option<String>,
+    /// When `true`, migrations are generated without a down (rollback) section.
+    pub no_down: bool,
 }
 
 /// CLI overrides — fields are `Option` so they layer on top of the file config.
@@ -276,6 +280,7 @@ pub struct CliOverrides {
     pub max_tokens: Option<u64>,
     pub model: Option<String>,
     pub context: Option<String>,
+    pub no_down: Option<bool>,
 }
 
 impl Config {
@@ -295,6 +300,7 @@ impl Config {
                 max_tokens: None,
                 model: None,
                 context: None,
+                no_down: None,
             }
         };
 
@@ -325,6 +331,8 @@ impl Config {
             None => None,
         };
 
+        let no_down = overrides.no_down.or(file_cfg.no_down).unwrap_or(false);
+
         Ok(Config {
             engine,
             format,
@@ -334,6 +342,7 @@ impl Config {
             max_tokens,
             model,
             context: overrides.context.or(file_cfg.context),
+            no_down,
         })
     }
 
@@ -472,6 +481,34 @@ mod tests {
         assert!(EngineKind::parse("postgres").is_err());
         assert!(EngineKind::parse("postgres-").is_err());
         assert!(EngineKind::parse("unknown").is_err());
+    }
+
+    #[test]
+    fn test_no_down_defaults_to_false() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("aim.toml"), "engine = \"sqlite\"\n").expect("write config");
+        let config = Config::load(dir.path(), CliOverrides::default()).expect("load");
+        assert!(!config.no_down);
+    }
+
+    #[test]
+    fn test_no_down_from_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("aim.toml"), "engine = \"sqlite\"\nno_down = true\n").expect("write config");
+        let config = Config::load(dir.path(), CliOverrides::default()).expect("load");
+        assert!(config.no_down);
+    }
+
+    #[test]
+    fn test_no_down_cli_override() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("aim.toml"), "engine = \"sqlite\"\n").expect("write config");
+        let overrides = CliOverrides {
+            no_down: Some(true),
+            ..Default::default()
+        };
+        let config = Config::load(dir.path(), overrides).expect("load");
+        assert!(config.no_down);
     }
 
     #[test]
