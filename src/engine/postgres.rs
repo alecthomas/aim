@@ -283,10 +283,17 @@ impl Drop for PostgresEngine {
 }
 
 /// Wait for the Postgres container to be ready to accept connections.
+///
+/// The probe connects over TCP (`-h 127.0.0.1`) rather than the default Unix
+/// socket. During first-time initialization the image runs a temporary
+/// bootstrap server that listens on the socket only (`listen_addresses=''`),
+/// then shuts it down before starting the real server with TCP enabled.
+/// Gating on TCP keeps the bootstrap server invisible, so we don't get a false
+/// "ready" and then race the socket disappearing mid-query.
 fn wait_ready(container: &str) -> Result<(), Error> {
     for _ in 0..60 {
         let output = Command::new("docker")
-            .args(["exec", container, "pg_isready", "-U", DB_USER])
+            .args(["exec", container, "pg_isready", "-h", "127.0.0.1", "-U", DB_USER])
             .output()
             .map_err(|e| Error::Connection(format!("checking readiness: {e}")))?;
 
