@@ -316,6 +316,13 @@ fn clean_routine_definition(sql: &str) -> String {
 }
 
 /// Wait for the MySQL container to be ready to accept authenticated connections.
+///
+/// The probe forces a TCP connection (`--host=127.0.0.1 --protocol=TCP`)
+/// rather than the default Unix socket. During first-time initialization the
+/// image runs a temporary bootstrap server with `--skip-networking` (socket
+/// only), then restarts the real server with networking enabled. Gating on TCP
+/// keeps the bootstrap server invisible, so we don't get a false "ready" and
+/// then race the socket disappearing mid-query.
 fn wait_ready(container: &str, client: &str) -> Result<(), Error> {
     for _ in 0..60 {
         let output = Command::new("docker")
@@ -323,6 +330,8 @@ fn wait_ready(container: &str, client: &str) -> Result<(), Error> {
                 "exec",
                 container,
                 client,
+                "--host=127.0.0.1",
+                "--protocol=TCP",
                 &format!("--user={DB_USER}"),
                 &format!("--password={DB_PASS}"),
                 "-e",
