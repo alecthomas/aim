@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::validation::{self, FileValidationConfig, ValidationRule};
+
 /// Errors that can occur when loading or validating configuration.
 #[derive(Debug)]
 pub enum Error {
@@ -239,6 +241,7 @@ impl fmt::Display for ModelSpec {
 
 /// On-disk representation of `aim.toml`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileConfig {
     engine: Option<EngineKind>,
     format: Option<FormatKind>,
@@ -252,6 +255,9 @@ struct FileConfig {
     context: Option<String>,
     /// Disable generation of down (rollback) migrations.
     no_down: Option<bool>,
+    /// Schema-change validation rules.
+    #[serde(default)]
+    validation: FileValidationConfig,
 }
 
 /// Resolved configuration used at runtime.
@@ -267,6 +273,8 @@ pub struct Config {
     pub context: Option<String>,
     /// When `true`, migrations are generated without a down (rollback) section.
     pub no_down: bool,
+    /// Resolved schema-change validation rules.
+    pub validation_rules: Vec<ValidationRule>,
 }
 
 /// CLI overrides — fields are `Option` so they layer on top of the file config.
@@ -301,6 +309,7 @@ impl Config {
                 model: None,
                 context: None,
                 no_down: None,
+                validation: FileValidationConfig::default(),
             }
         };
 
@@ -333,6 +342,8 @@ impl Config {
 
         let no_down = overrides.no_down.or(file_cfg.no_down).unwrap_or(false);
 
+        let validation_rules = validation::resolve(&file_cfg.validation).map_err(Error::Validation)?;
+
         Ok(Config {
             engine,
             format,
@@ -343,6 +354,7 @@ impl Config {
             model,
             context: overrides.context.or(file_cfg.context),
             no_down,
+            validation_rules,
         })
     }
 
@@ -367,6 +379,21 @@ max_tokens = {max_tokens}
         if let Some(model) = model {
             toml.push_str(&format!("model = \"{model}\"\n"));
         }
+        toml.push_str(
+            r#"
+# Schema-change validation. The LLM checks each generated up migration
+# against these rules; error-level matches fail the migration, warning-level
+# matches are reported but non-blocking.
+#
+# [validation]
+# disabled = ["drop-index"]              # turn off built-in rules by id
+#
+# [[validation.rules]]                    # add your own rules
+# id = "no-cascade-delete"
+# level = "warning"                       # "error" (default) or "warning"
+# rule = "Flag foreign keys declared with ON DELETE CASCADE."
+"#,
+        );
         toml
     }
 }
@@ -374,6 +401,19 @@ max_tokens = {max_tokens}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_file_config_rejects_unknown_field() {
+        let toml = "engine = \"sqlite\"\nmigrationss = \"migrations\"\n";
+        let err = toml::from_str::<FileConfig>(toml).expect_err("unknown field must error");
+        assert!(err.to_string().contains("migrationss"), "{err}");
+    }
+
+    #[test]
+    fn test_file_config_accepts_known_fields() {
+        let toml = "engine = \"sqlite\"\nmigrations = \"migrations\"\n";
+        toml::from_str::<FileConfig>(toml).expect("known fields should parse");
+    }
 
     #[test]
     fn test_model_spec_parse_openai() {

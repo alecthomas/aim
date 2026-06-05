@@ -109,6 +109,29 @@ Set `no_down = true` to generate migrations without a DOWN (rollback) section. R
 
 Global flags (`--engine`, `--model`, `--format`, `--schema`, `--migrations`, `--max-retries`, `--no-down`) override config file values.
 
+## Schema validation
+
+After a migration is generated and verified, AIM checks its UP statements against a set of validation rules that detect destructive schema changes. Each rule is evaluated by its own isolated LLM check (one per rule, run in parallel) that only ever sees the UP migration — the DOWN migration is exempt, since rollbacks are expected to be destructive. Each rule has a stable id and a level:
+
+- `error` — a match fails the migration.
+- `warning` — a match is reported but does not block the migration.
+
+Built-in rules: `drop-table`, `drop-column`, `narrowing-type-change`, `remove-enum-value`, `destructive-dml` (all `error`), and `add-not-null-without-default`, `drop-index` (both `warning`).
+
+Configure validation in `aim.toml`:
+
+```toml
+[validation]
+disabled = ["drop-index"]              # turn off built-in rules by id
+
+[[validation.rules]]                    # add your own rules
+id = "no-cascade-delete"
+level = "warning"                       # "error" (default) or "warning"
+rule = "Flag foreign keys declared with ON DELETE CASCADE, since cascading deletes can silently remove rows."
+```
+
+The `rule` text is an English description of the behaviour to flag; it is injected into that rule's validator prompt verbatim. To redefine a built-in rule, add it to `disabled` and declare a custom rule with the same id.
+
 ## Supported LLM providers
 
 anthropic, openai, gemini, cohere, deepseek, groq, mistral, ollama, openrouter, together, xai, perplexity, and others via [rig](https://github.com/0xPlaygrounds/rig).

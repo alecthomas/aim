@@ -10,3 +10,4 @@ pub mod migration;
 pub mod output;
 pub mod schema;
 pub mod seed;
+pub mod validation;

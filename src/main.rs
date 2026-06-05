@@ -285,17 +285,10 @@ async fn cmd_generate(cli: &Cli, dry_run: bool) -> Result<(), Box<dyn std::error
 
     let model = config
         .model
+        .clone()
         .ok_or("--model is required for generate (set in aim.toml or pass --model)")?;
 
-    let agent_loop = agent::AgentLoop::new(
-        engine.as_ref(),
-        config.schema_path.clone(),
-        model,
-        config.max_retries,
-        config.max_tokens,
-        config.context.clone(),
-        config.no_down,
-    );
+    let agent_loop = agent::AgentLoop::new(engine.as_ref(), &config, model);
 
     let result = match agent_loop.run(&prior, next_seq, &diff).await {
         Ok(r) => r,

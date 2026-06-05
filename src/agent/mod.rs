@@ -15,12 +15,14 @@ use sqlparser::dialect::Dialect;
 use sqlparser::parser::Parser;
 
 use crate::auth;
-use crate::config::ModelSpec;
+use crate::config::{Config, ModelSpec};
+use crate::display;
 use crate::engine::{self, DatabaseEngine};
 use crate::migration::Migration;
 use crate::output::{Output, Spinner};
 use crate::schema;
 use crate::seed;
+use crate::validation::{self, RuleLevel, RuleVerdict, ValidationRule, VerdictStatus};
 
 use tools::MigrationOutput;
 
@@ -39,6 +41,17 @@ pub enum Error {
     },
     /// Database engine error during verification.
     Engine(crate::engine::Error),
+    /// The up migration matched one or more error-level validation rules.
+    ValidationFailed { violations: Vec<RuleViolation> },
+}
+
+/// A validation rule the up migration matched, with the validator's explanation.
+#[derive(Debug, Clone)]
+pub struct RuleViolation {
+    /// Identifier of the matched rule.
+    pub rule_id: String,
+    /// Validator's explanation of what triggered the rule.
+    pub detail: String,
 }
 
 impl fmt::Display for Error {
@@ -59,6 +72,16 @@ impl fmt::Display for Error {
                 )
             }
             Error::Engine(err) => write!(f, "engine error during verification: {err}"),
+            Error::ValidationFailed { violations } => {
+                writeln!(f, "migration failed schema validation:")?;
+                for v in violations {
+                    writeln!(f, "  [{}] {}", v.rule_id, v.detail)?;
+                }
+                write!(
+                    f,
+                    "disable the offending rule(s) in aim.toml under [validation] if intended"
+                )
+            }
         }
     }
 }
@@ -120,26 +143,25 @@ pub struct AgentLoop<'a> {
     context: Option<String>,
     /// When `true`, no down (rollback) migration is generated or verified.
     no_down: bool,
+    /// Schema-change validation rules the agent checks the up migration against.
+    rules: Vec<ValidationRule>,
 }
 
 impl<'a> AgentLoop<'a> {
-    pub fn new(
-        engine: &'a dyn DatabaseEngine,
-        schema_path: PathBuf,
-        model: ModelSpec,
-        max_retries: usize,
-        max_tokens: u64,
-        context: Option<String>,
-        no_down: bool,
-    ) -> Self {
+    /// Build an agent loop from resolved configuration and a target engine.
+    ///
+    /// `model` is passed separately because [`Config::model`] is optional, but
+    /// the agent loop requires a concrete model resolved by the caller.
+    pub fn new(engine: &'a dyn DatabaseEngine, config: &Config, model: ModelSpec) -> Self {
         Self {
             engine,
-            schema_path,
+            schema_path: config.schema_path.clone(),
             model,
-            max_retries,
-            max_tokens,
-            context,
-            no_down,
+            max_retries: config.max_retries,
+            max_tokens: config.max_tokens,
+            context: config.context.clone(),
+            no_down: config.no_down,
+            rules: config.validation_rules.clone(),
         }
     }
 
@@ -433,6 +455,31 @@ impl<'a> AgentLoop<'a> {
             }
 
             if outcome.is_clean() {
+                // Validate the verified up migration against each rule in
+                // isolation. An error-level match aborts (no retry — the change
+                // is intrinsic to the requested schema); warnings are advisory.
+                if !self.rules.is_empty() {
+                    println!();
+                    Output::phase("Validating schema changes...");
+                    let verdicts = self.validate_up_migration(client, &candidate.up_sql).await?;
+                    let (errors, warnings) = classify_violations(&verdicts);
+                    for w in &warnings {
+                        Output::warn(&format!("[{}] {}", w.rule_id, w.detail));
+                    }
+                    if !errors.is_empty() {
+                        // Show the offending migration first so the reported
+                        // errors have context the user can read.
+                        println!("\n-- UP --");
+                        display::highlight_sql(&candidate.up_sql);
+                        println!();
+                        for e in &errors {
+                            Output::error(&format!("[{}] {}", e.rule_id, e.detail));
+                        }
+                        return Err(Error::ValidationFailed { violations: errors });
+                    }
+                    Output::success("schema changes passed validation");
+                }
+
                 let migration = Migration {
                     sequence: next_sequence,
                     description: candidate.description,
@@ -480,6 +527,38 @@ impl<'a> AgentLoop<'a> {
         }
 
         unreachable!("loop always returns or errors")
+    }
+
+    /// Validate the up migration against every enabled rule, in parallel.
+    ///
+    /// Each rule gets its own isolated [`rig::extractor::Extractor`] that is
+    /// handed ONLY `up_sql`, so a validator cannot see (and wrongly flag) the
+    /// down migration. Returns each rule paired with its verdict.
+    async fn validate_up_migration<C>(
+        &self,
+        client: &C,
+        up_sql: &str,
+    ) -> Result<Vec<(ValidationRule, RuleVerdict)>, Error>
+    where
+        C: CompletionClient,
+        C::CompletionModel: rig::completion::CompletionModel,
+    {
+        let dialect = self.engine.dialect_description();
+        let checks = self.rules.iter().map(|rule| {
+            let extractor = client
+                .extractor::<RuleVerdict>(&self.model.model)
+                .preamble(&validation::validator_preamble(dialect, rule))
+                .max_tokens(self.max_tokens)
+                .build();
+            async move {
+                extractor
+                    .extract(up_sql)
+                    .await
+                    .map(|verdict| (rule.clone(), verdict))
+                    .map_err(|e| Error::Llm(format!("validating rule '{}': {e}", rule.id)))
+            }
+        });
+        futures::future::join_all(checks).await.into_iter().collect()
     }
 
     /// Build the desired DDL by loading schema.sql into an ephemeral DB
@@ -699,6 +778,28 @@ fn validate_seed_coverage(
     }
 
     issues
+}
+
+/// Split failing verdicts into error-level and warning-level violations by each
+/// rule's configured level. Passing verdicts are ignored. Returns
+/// `(errors, warnings)`.
+fn classify_violations(verdicts: &[(ValidationRule, RuleVerdict)]) -> (Vec<RuleViolation>, Vec<RuleViolation>) {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    for (rule, verdict) in verdicts {
+        if verdict.status != VerdictStatus::Fail {
+            continue;
+        }
+        let violation = RuleViolation {
+            rule_id: rule.id.clone(),
+            detail: verdict.detail.clone(),
+        };
+        match rule.level {
+            RuleLevel::Error => errors.push(violation),
+            RuleLevel::Warning => warnings.push(violation),
+        }
+    }
+    (errors, warnings)
 }
 
 /// Detect disallowed literal-data INSERTs in a candidate migration.
@@ -1175,5 +1276,48 @@ mod tests {
         append_data_issue(&mut existing, "expected_after_down", "bad");
         assert!(existing.starts_with("--- a\n+++ b\n"));
         assert!(existing.contains("Data preservation check failed (expected_after_down)"));
+    }
+
+    fn rule(id: &str, level: RuleLevel) -> ValidationRule {
+        ValidationRule {
+            id: id.into(),
+            level,
+            rule: "r".into(),
+        }
+    }
+
+    fn verdict(status: VerdictStatus, detail: &str) -> RuleVerdict {
+        RuleVerdict {
+            status,
+            detail: detail.into(),
+        }
+    }
+
+    #[test]
+    fn test_classify_violations_splits_failures_by_level() {
+        let verdicts = vec![
+            (
+                rule("drop-table", RuleLevel::Error),
+                verdict(VerdictStatus::Fail, "drops users"),
+            ),
+            (
+                rule("drop-index", RuleLevel::Warning),
+                verdict(VerdictStatus::Fail, "drops idx"),
+            ),
+        ];
+        let (errors, warnings) = classify_violations(&verdicts);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].rule_id, "drop-table");
+        assert_eq!(errors[0].detail, "drops users");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].rule_id, "drop-index");
+    }
+
+    #[test]
+    fn test_classify_violations_ignores_passing_verdicts() {
+        let verdicts = vec![(rule("drop-table", RuleLevel::Error), verdict(VerdictStatus::Pass, ""))];
+        let (errors, warnings) = classify_violations(&verdicts);
+        assert!(errors.is_empty());
+        assert!(warnings.is_empty());
     }
 }

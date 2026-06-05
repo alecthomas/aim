@@ -15,6 +15,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "dirs",
+ "futures",
  "libc",
  "open",
  "rig-core",
