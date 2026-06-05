@@ -116,7 +116,21 @@ After a migration is generated and verified, AIM checks its UP statements agains
 - `error` — a match fails the migration.
 - `warning` — a match is reported but does not block the migration.
 
-Built-in rules: `drop-table`, `drop-column`, `narrowing-type-change`, `remove-enum-value`, `destructive-dml` (all `error`), and `add-not-null-without-default`, `drop-index` (both `warning`).
+### Built-in rules
+
+All built-in rules default to `warning`. Raise one to `error` (see below) to make it block migrations.
+
+| Rule | Default level | Flags |
+|------|---------------|-------|
+| `drop-table` | `warning` | A statement that DROPs a table, permanently destroying all of its rows. |
+| `drop-column` | `warning` | A statement that DROPs a column, permanently destroying all data in it. |
+| `narrowing-type-change` | `warning` | A column type change that can truncate values, lose precision, or fail on existing data (e.g. shrinking a length, or converting text to a numeric type). |
+| `remove-enum-value` | `warning` | Removing or renaming an enum value, which can orphan rows that reference it. |
+| `destructive-dml` | `warning` | A TRUNCATE, or a DELETE/UPDATE without a WHERE clause, affecting every row in the table. |
+| `add-not-null-without-default` | `warning` | Adding a NOT NULL column or constraint without a DEFAULT, which fails when the table already contains rows. |
+| `drop-index` | `warning` | Dropping an index, which may degrade query performance. |
+
+Run `aim rules` to print the full set of enabled rules (built-ins minus `disabled`, plus your custom rules) with their resolved levels.
 
 Configure validation in `aim.toml`:
 

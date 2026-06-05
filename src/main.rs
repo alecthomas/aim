@@ -7,6 +7,7 @@ use aim::engine::postgres::PostgresEngine;
 use aim::engine::sqlite::SqliteEngine;
 use aim::engine::{self, DatabaseEngine};
 use aim::output::Output;
+use aim::validation::RuleLevel;
 use aim::{agent, display, seed};
 
 #[derive(Parser)]
@@ -73,6 +74,8 @@ enum Command {
     },
     /// Validate all migrations: UP, DOWN, and UP+DOWN+UP idempotency.
     Validate,
+    /// List the enabled schema-validation rules.
+    Rules,
     /// Configure API key for an LLM provider.
     Auth {
         /// Provider name (e.g. anthropic, openai). Inferred from aim.toml if omitted.
@@ -114,7 +117,31 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Diff { exit_code } => cmd_diff(&cli, exit_code)?,
         Command::Generate { dry_run } => cmd_generate(&cli, dry_run).await?,
         Command::Validate => cmd_validate(&cli)?,
+        Command::Rules => cmd_list_rules(&cli)?,
         Command::Auth { ref provider } => cmd_auth(&cli, provider.clone())?,
+    }
+    Ok(())
+}
+
+fn cmd_list_rules(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    use yansi::Paint;
+
+    let cwd = std::env::current_dir()?;
+    let config = Config::load(&cwd, cli.overrides())?;
+
+    if config.validation_rules.is_empty() {
+        Output::success("no validation rules enabled");
+        return Ok(());
+    }
+
+    println!("{}", "Enabled validation rules:".bold());
+    for rule in &config.validation_rules {
+        let level = match rule.level {
+            RuleLevel::Error => "error".red().bold(),
+            RuleLevel::Warning => "warning".yellow().bold(),
+        };
+        println!("  {} ({level})", rule.id.bold());
+        println!("    {}", rule.rule);
     }
     Ok(())
 }
