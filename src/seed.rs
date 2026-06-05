@@ -1,7 +1,24 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::agent::tools::TableSeedData;
 use crate::schema::ArrayColumns;
+
+/// Sorted column names from `row`, excluding any present in `excluded`.
+///
+/// Used to drop columns that a migration removes (and that a down migration
+/// cannot restore) from data-preservation predicates.
+fn retained_columns<'a>(
+    row: &'a HashMap<String, serde_json::Value>,
+    excluded: Option<&HashSet<String>>,
+) -> Vec<&'a str> {
+    let mut cols: Vec<&str> = row
+        .keys()
+        .map(String::as_str)
+        .filter(|c| !excluded.is_some_and(|e| e.contains(*c)))
+        .collect();
+    cols.sort_unstable();
+    cols
+}
 
 /// Converts a JSON value to a SQL literal string.
 ///
@@ -132,10 +149,14 @@ fn where_condition(col: &str, val: &serde_json::Value, is_array: bool) -> String
 /// produces a `SELECT col1, col2 FROM table WHERE col1 = val1 AND col2 = val2;`.
 /// Columns are sorted alphabetically. Tables are sorted alphabetically,
 /// with a blank line between tables.
+///
+/// Columns listed in `exclude` for a table are omitted from the predicates
+/// (e.g. columns a migration drops, which a down migration cannot restore).
 pub fn build_select_statements(
     seed_data: &HashMap<String, TableSeedData>,
     direction: Direction,
     array_cols: &ArrayColumns,
+    exclude: &HashMap<String, HashSet<String>>,
 ) -> String {
     let mut tables: Vec<&String> = seed_data.keys().collect();
     tables.sort();
@@ -148,12 +169,15 @@ pub fn build_select_statements(
             Direction::Up => &seed.expected_after_up,
             Direction::Down => &seed.expected_after_down,
         };
+        let excluded = exclude.get(table.as_str());
         let stmts: Vec<String> = expected
             .iter()
             .map(|row| {
-                let mut cols: Vec<&str> = row.keys().map(String::as_str).collect();
-                cols.sort();
-                let col_list = cols.to_vec().join(", ");
+                let cols = retained_columns(row, excluded);
+                if cols.is_empty() {
+                    return format!("SELECT * FROM {table};");
+                }
+                let col_list = cols.join(", ");
                 let conditions = cols
                     .iter()
                     .map(|c| where_condition(c, &row[*c], is_array_col(array_cols, table, c)))
@@ -221,10 +245,15 @@ fn render_row(row: &HashMap<String, serde_json::Value>) -> String {
 /// existence check per expected row. Existence checks reuse the same
 /// `=` / `IS NULL` predicates as [`build_select_statements`], so the
 /// comparison logic stays in one place.
+///
+/// Columns listed in `exclude` for a table are omitted from the existence
+/// predicates (e.g. columns a migration drops, which a down migration cannot
+/// restore). Total row-count checks are unaffected.
 pub fn build_row_checks(
     seed_data: &HashMap<String, TableSeedData>,
     direction: Direction,
     array_cols: &ArrayColumns,
+    exclude: &HashMap<String, HashSet<String>>,
 ) -> Vec<RowCheck> {
     let mut tables: Vec<&String> = seed_data.keys().collect();
     tables.sort();
@@ -236,6 +265,7 @@ pub fn build_row_checks(
             Direction::Up => &seed.expected_after_up,
             Direction::Down => &seed.expected_after_down,
         };
+        let excluded = exclude.get(table.as_str());
 
         checks.push(RowCheck::Total {
             table: table.clone(),
@@ -244,8 +274,7 @@ pub fn build_row_checks(
         });
 
         for row in expected {
-            let mut cols: Vec<&str> = row.keys().map(String::as_str).collect();
-            cols.sort();
+            let cols = retained_columns(row, excluded);
             let count_sql = if cols.is_empty() {
                 format!("SELECT COUNT(*) FROM {table}")
             } else {
@@ -436,7 +465,7 @@ INSERT INTO users (id, name) VALUES (2, 'bob');";
             },
         )]);
         let array_cols: ArrayColumns = HashMap::from([("acl".to_string(), HashSet::from(["args".to_string()]))]);
-        let sql = build_select_statements(&data, Direction::Up, &array_cols);
+        let sql = build_select_statements(&data, Direction::Up, &array_cols, &no_arrays());
         assert_eq!(sql, r#"SELECT args, id FROM acl WHERE args = '{"read"}' AND id = 1;"#);
     }
 
@@ -490,7 +519,7 @@ INSERT INTO users (id, name) VALUES (2, 'bob');";
     #[test]
     fn select_statements_after_up() {
         let data = make_seed_data_with_expected();
-        let sql = build_select_statements(&data, Direction::Up, &no_arrays());
+        let sql = build_select_statements(&data, Direction::Up, &no_arrays(), &no_arrays());
 
         let expected = "\
 SELECT id, user_id FROM orders WHERE id = 10 AND user_id = 1;\n\
@@ -504,7 +533,7 @@ SELECT email, id, name FROM users WHERE email = '' AND id = 2 AND name = 'bob';"
     #[test]
     fn select_statements_after_down() {
         let data = make_seed_data_with_expected();
-        let sql = build_select_statements(&data, Direction::Down, &no_arrays());
+        let sql = build_select_statements(&data, Direction::Down, &no_arrays(), &no_arrays());
 
         let expected = "\
 SELECT id, user_id FROM orders WHERE id = 10 AND user_id = 1;\n\
@@ -528,27 +557,30 @@ SELECT id, name FROM users WHERE id = 2 AND name = 'bob';";
                 expected_after_down: vec![],
             },
         )]);
-        let sql = build_select_statements(&data, Direction::Up, &no_arrays());
+        let sql = build_select_statements(&data, Direction::Up, &no_arrays(), &no_arrays());
         assert_eq!(sql, "SELECT id, value FROM settings WHERE id = 1 AND value IS NULL;");
     }
 
     #[test]
     fn select_statements_skips_empty_expected() {
         let data = make_seed_data();
-        let sql = build_select_statements(&data, Direction::Up, &no_arrays());
+        let sql = build_select_statements(&data, Direction::Up, &no_arrays(), &no_arrays());
         assert_eq!(sql, "");
     }
 
     #[test]
     fn select_statements_empty() {
         let data: HashMap<String, TableSeedData> = HashMap::new();
-        assert_eq!(build_select_statements(&data, Direction::Up, &no_arrays()), "");
+        assert_eq!(
+            build_select_statements(&data, Direction::Up, &no_arrays(), &no_arrays()),
+            ""
+        );
     }
 
     #[test]
     fn row_checks_total_and_existence() {
         let data = make_seed_data_with_expected();
-        let checks = build_row_checks(&data, Direction::Up, &no_arrays());
+        let checks = build_row_checks(&data, Direction::Up, &no_arrays(), &no_arrays());
 
         // orders: 1 total + 1 existence; users: 1 total + 2 existence = 5.
         assert_eq!(checks.len(), 5);
@@ -584,7 +616,7 @@ SELECT id, name FROM users WHERE id = 2 AND name = 'bob';";
                 expected_after_down: vec![],
             },
         )]);
-        let checks = build_row_checks(&data, Direction::Up, &no_arrays());
+        let checks = build_row_checks(&data, Direction::Up, &no_arrays(), &no_arrays());
         let exists = checks
             .iter()
             .find(|c| matches!(c, RowCheck::Exists { .. }))
@@ -598,6 +630,42 @@ SELECT id, name FROM users WHERE id = 2 AND name = 'bob';";
     #[test]
     fn row_checks_empty() {
         let data: HashMap<String, TableSeedData> = HashMap::new();
-        assert!(build_row_checks(&data, Direction::Up, &no_arrays()).is_empty());
+        assert!(build_row_checks(&data, Direction::Up, &no_arrays(), &no_arrays()).is_empty());
+    }
+
+    #[test]
+    fn row_checks_down_excludes_dropped_columns() {
+        // `created_at` is dropped by UP; after DOWN it is re-added with a default,
+        // so its original value is unrecoverable and must be excluded from the
+        // existence predicate. `id`/`name` survive and are still checked.
+        let data = HashMap::from([(
+            "users".to_string(),
+            TableSeedData {
+                rows: vec![],
+                expected_after_up: vec![],
+                expected_after_down: vec![HashMap::from([
+                    ("id".to_string(), json!(1)),
+                    ("name".to_string(), json!("alice")),
+                    ("created_at".to_string(), json!("2024-01-01 10:00:00")),
+                ])],
+            },
+        )]);
+        let exclude = HashMap::from([("users".to_string(), HashSet::from(["created_at".to_string()]))]);
+        let checks = build_row_checks(&data, Direction::Down, &no_arrays(), &exclude);
+
+        // Total check still asserts the row count is preserved.
+        assert_eq!(
+            checks[0],
+            RowCheck::Total {
+                table: "users".into(),
+                count_sql: "SELECT COUNT(*) FROM users".into(),
+                count: 1,
+            }
+        );
+        // Existence predicate omits the dropped column but keeps the survivors.
+        assert_eq!(
+            checks[1].count_sql(),
+            "SELECT COUNT(*) FROM users WHERE id = 1 AND name = 'alice'"
+        );
     }
 }

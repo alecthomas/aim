@@ -626,9 +626,15 @@ impl<'a> AgentLoop<'a> {
         let up_diff = engine::schema_diff(dialect.as_ref(), &desired, "schema.sql", &after_up, "migration result");
 
         // Data-preservation check: surviving tables must match expected_after_up.
+        let no_exclusions = std::collections::HashMap::new();
         let up_data_issue = if up_diff.is_empty() {
             let surviving: HashSet<String> = schema::table_names(dialect.as_ref(), &after_up).into_iter().collect();
-            let up_checks = seed::build_row_checks(&candidate.seed_data, seed::Direction::Up, desired_array_columns);
+            let up_checks = seed::build_row_checks(
+                &candidate.seed_data,
+                seed::Direction::Up,
+                desired_array_columns,
+                &no_exclusions,
+            );
             self.run_seed_checks(&db_right, &up_checks, &surviving)?
         } else {
             None
@@ -657,11 +663,19 @@ impl<'a> AgentLoop<'a> {
             );
 
             // Data-preservation check: restored tables must match expected_after_down.
+            // Columns dropped by UP are re-added by DOWN with their DEFAULT, not
+            // their original values, so exclude them from the row predicates: the
+            // data is irrecoverable and the count check still guards row totals.
             let down_data_issue = if down_diff.is_empty() {
                 let restored: HashSet<String> =
                     schema::table_names(dialect.as_ref(), &after_down).into_iter().collect();
-                let down_checks =
-                    seed::build_row_checks(&candidate.seed_data, seed::Direction::Down, previous_array_columns);
+                let dropped = schema::dropped_columns(dialect.as_ref(), &prev_schema, &desired);
+                let down_checks = seed::build_row_checks(
+                    &candidate.seed_data,
+                    seed::Direction::Down,
+                    previous_array_columns,
+                    &dropped,
+                );
                 self.run_seed_checks(&db_right, &down_checks, &restored)?
             } else {
                 None
@@ -1088,7 +1102,12 @@ mod tests {
         present: &[&str],
     ) -> Option<String> {
         let present: HashSet<String> = present.iter().map(|s| s.to_string()).collect();
-        for check in seed::build_row_checks(seed_data, seed::Direction::Up, &schema::ArrayColumns::new()) {
+        for check in seed::build_row_checks(
+            seed_data,
+            seed::Direction::Up,
+            &schema::ArrayColumns::new(),
+            &HashMap::new(),
+        ) {
             if !present.contains(check.table()) {
                 continue;
             }

@@ -319,14 +319,26 @@ async fn cmd_generate(cli: &Cli, dry_run: bool) -> Result<(), Box<dyn std::error
         println!("\n-- SEED INSERT --");
         display::highlight_sql(&inserts);
 
-        let selects_up =
-            seed::build_select_statements(&result.seed_data, seed::Direction::Up, &result.desired_array_columns);
+        let no_exclusions = std::collections::HashMap::new();
+        let selects_up = seed::build_select_statements(
+            &result.seed_data,
+            seed::Direction::Up,
+            &result.desired_array_columns,
+            &no_exclusions,
+        );
         println!("\n-- SEED SELECT (after up) --");
         display::highlight_sql(&selects_up);
 
         if !config.no_down {
-            let selects_down =
-                seed::build_select_statements(&result.seed_data, seed::Direction::Down, &result.previous_array_columns);
+            // Columns dropped by UP are re-added by DOWN with defaults, not their
+            // original values, so they are excluded from the after-down checks.
+            let dropped = aim::schema::dropped_columns(engine.dialect().as_ref(), &current_schema, &desired_schema);
+            let selects_down = seed::build_select_statements(
+                &result.seed_data,
+                seed::Direction::Down,
+                &result.previous_array_columns,
+                &dropped,
+            );
             println!("\n-- SEED SELECT (after down) --");
             display::highlight_sql(&selects_down);
         }

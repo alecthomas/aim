@@ -99,6 +99,69 @@ pub fn table_names(dialect: &dyn Dialect, ddl: &str) -> Vec<String> {
     names
 }
 
+/// Collect the set of column names for every table in a DDL dump.
+///
+/// Keyed by table name. Used to determine which columns a migration drops
+/// (present in the previous schema, absent in the desired schema), so the
+/// down-migration data check can skip values it cannot possibly restore.
+pub fn table_columns(dialect: &dyn Dialect, ddl: &str) -> HashMap<String, HashSet<String>> {
+    let statements: Vec<&str> = ddl
+        .split(";\n\n")
+        .map(|s| s.trim().trim_end_matches(';').trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut result: HashMap<String, HashSet<String>> = HashMap::new();
+    for sql in statements {
+        let Ok(parsed) = Parser::parse_sql(dialect, sql) else {
+            continue;
+        };
+        for stmt in parsed {
+            let Statement::CreateTable(ct) = stmt else {
+                continue;
+            };
+            let Some(table) = ct
+                .name
+                .0
+                .iter()
+                .filter_map(|part| match part {
+                    ObjectNamePart::Identifier(ident) => Some(ident.value.clone()),
+                    ObjectNamePart::Function(_) => None,
+                })
+                .next_back()
+            else {
+                continue;
+            };
+            let cols = ct.columns.iter().map(|col| col.name.value.clone()).collect();
+            result.insert(table, cols);
+        }
+    }
+    result
+}
+
+/// Columns present in `previous` but absent in `desired`, per table.
+///
+/// These are the columns an UP migration drops. A DOWN migration can re-add
+/// the column but cannot restore the original values, so the down-migration
+/// data check omits them. Only tables present in both schemas are considered;
+/// a wholesale table drop is handled separately.
+pub fn dropped_columns(dialect: &dyn Dialect, previous: &str, desired: &str) -> HashMap<String, HashSet<String>> {
+    let previous_cols = table_columns(dialect, previous);
+    let desired_cols = table_columns(dialect, desired);
+
+    let mut result = HashMap::new();
+    for (table, cols) in previous_cols {
+        let Some(kept) = desired_cols.get(&table) else {
+            continue;
+        };
+        let dropped: HashSet<String> = cols.difference(kept).cloned().collect();
+        if !dropped.is_empty() {
+            result.insert(table, dropped);
+        }
+    }
+    result
+}
+
 /// Identify array-typed columns per table in a DDL dump.
 ///
 /// Only PostgreSQL has true array column types; for other dialects this
@@ -370,6 +433,49 @@ mod tests {
         assert!(acl.contains("tags"), "tags should be array: {acl:?}");
         assert!(!acl.contains("reason"), "reason is not an array");
         assert!(!acl.contains("id"), "id is not an array");
+    }
+
+    #[test]
+    fn test_table_columns_basic() {
+        let ddl = "CREATE TABLE users (id INTEGER, name TEXT, created_at TEXT);\n\nCREATE TABLE groups (id INTEGER)";
+        let cols = table_columns(&sqlite(), ddl);
+        let users = cols.get("users").expect("users table");
+        assert!(users.contains("id") && users.contains("name") && users.contains("created_at"));
+        assert_eq!(users.len(), 3);
+        assert_eq!(cols.get("groups").expect("groups").len(), 1);
+    }
+
+    #[test]
+    fn test_table_columns_ignores_views_and_indexes() {
+        let ddl = "CREATE TABLE users (id INTEGER);\n\nCREATE INDEX idx ON users (id);\n\nCREATE VIEW v AS SELECT * FROM users";
+        let cols = table_columns(&sqlite(), ddl);
+        assert_eq!(cols.len(), 1);
+        assert!(cols.contains_key("users"));
+    }
+
+    #[test]
+    fn test_dropped_columns_detects_removed_column() {
+        let previous = "CREATE TABLE users (id INTEGER, name TEXT, created_at TEXT)";
+        let desired = "CREATE TABLE users (id INTEGER, name TEXT, email TEXT)";
+        let dropped = dropped_columns(&sqlite(), previous, desired);
+        let users = dropped.get("users").expect("users");
+        assert!(users.contains("created_at"));
+        assert!(!users.contains("email"), "added columns are not dropped");
+        assert_eq!(users.len(), 1);
+    }
+
+    #[test]
+    fn test_dropped_columns_none_when_only_added() {
+        let previous = "CREATE TABLE users (id INTEGER, name TEXT)";
+        let desired = "CREATE TABLE users (id INTEGER, name TEXT, email TEXT)";
+        assert!(dropped_columns(&sqlite(), previous, desired).is_empty());
+    }
+
+    #[test]
+    fn test_dropped_columns_ignores_wholesale_table_drop() {
+        let previous = "CREATE TABLE users (id INTEGER);\n\nCREATE TABLE legacy (id INTEGER, data TEXT)";
+        let desired = "CREATE TABLE users (id INTEGER)";
+        assert!(dropped_columns(&sqlite(), previous, desired).is_empty());
     }
 
     #[test]

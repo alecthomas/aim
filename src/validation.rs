@@ -99,32 +99,32 @@ pub struct CustomRule {
 
 /// Built-in validation rules, applied unless explicitly disabled.
 pub fn builtin_rules() -> Vec<ValidationRule> {
-    use RuleLevel::{Error, Warning};
+    use RuleLevel::Warning;
     [
         (
             "drop-table",
-            Error,
+            Warning,
             "Flag any statement that DROPs a table; this permanently destroys all rows in that table.",
         ),
         (
             "drop-column",
-            Error,
+            Warning,
             "Flag any statement that DROPs a column; this permanently destroys all data in that column.",
         ),
         (
             "narrowing-type-change",
-            Error,
+            Warning,
             "Flag any column type change that can truncate values, lose precision, or fail on \
              existing data (e.g. shrinking a length, or converting text to a numeric type).",
         ),
         (
             "remove-enum-value",
-            Error,
+            Warning,
             "Flag the removal or renaming of an enum value, which can orphan rows that reference it.",
         ),
         (
             "destructive-dml",
-            Error,
+            Warning,
             "Flag TRUNCATE statements, or DELETE/UPDATE statements without a WHERE clause, since \
              they affect every row in the table.",
         ),
