@@ -176,6 +176,7 @@ pub struct ModelSpec {
 const KNOWN_PROVIDERS: &[&str] = &[
     "anthropic",
     "azure",
+    "bedrock",
     "cohere",
     "deepseek",
     "galadriel",
@@ -427,6 +428,14 @@ mod tests {
         let spec = ModelSpec::parse("anthropic-claude-haiku-4-5-20251001").expect("parse");
         assert_eq!(spec.provider, "anthropic");
         assert_eq!(spec.model, "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn test_model_spec_parse_bedrock() {
+        // Bedrock model IDs embed dots, colons, and an optional region prefix.
+        let spec = ModelSpec::parse("bedrock-us.anthropic.claude-3-5-sonnet-20241022-v2:0").expect("parse");
+        assert_eq!(spec.provider, "bedrock");
+        assert_eq!(spec.model, "us.anthropic.claude-3-5-sonnet-20241022-v2:0");
     }
 
     #[test]

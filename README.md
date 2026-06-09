@@ -148,4 +148,23 @@ The `rule` text is an English description of the behaviour to flag; it is inject
 
 ## Supported LLM providers
 
-anthropic, openai, gemini, cohere, deepseek, groq, mistral, ollama, openrouter, together, xai, perplexity, and others via [rig](https://github.com/0xPlaygrounds/rig).
+anthropic, openai, gemini, cohere, deepseek, groq, mistral, ollama, openrouter, together, xai, perplexity, bedrock, and others via [rig](https://github.com/0xPlaygrounds/rig).
+
+### AWS Bedrock
+
+Bedrock uses the standard AWS credential chain (environment variables, shared
+config/profile, or IMDS) rather than an aim-managed API key, so `aim auth` does
+not apply. Configure credentials the usual way:
+
+```sh
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_REGION=us-east-1
+```
+
+The model is selected with a `bedrock-<model-id>` specifier, where `<model-id>`
+is a Bedrock model or inference-profile id:
+
+```sh
+aim generate --model bedrock-us.anthropic.claude-sonnet-4-6
+```

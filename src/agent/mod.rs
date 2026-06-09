@@ -26,6 +26,14 @@ use crate::validation::{self, RuleLevel, RuleVerdict, ValidationRule, VerdictSta
 
 use tools::MigrationOutput;
 
+/// Whether a provider authenticates without an aim-managed API key.
+///
+/// Ollama runs locally, and Bedrock relies on the AWS credential chain
+/// (environment variables, shared config/profile, or IMDS).
+fn provider_is_keyless(provider: &str) -> bool {
+    matches!(provider, "ollama" | "bedrock")
+}
+
 /// Errors from the agent loop.
 #[derive(Debug)]
 pub enum Error {
@@ -175,8 +183,10 @@ impl<'a> AgentLoop<'a> {
         next_sequence: u64,
         schema_diff: &str,
     ) -> Result<MigrationResult, Error> {
-        // Ollama runs locally and doesn't need an API key.
-        let api_key = if self.model.provider == "ollama" {
+        // Some providers don't use an aim-managed API key: Ollama runs
+        // locally, and Bedrock authenticates via the AWS credential chain
+        // (env vars, shared config/profile, or IMDS).
+        let api_key = if provider_is_keyless(self.model.provider) {
             None
         } else {
             Some(auth::resolve_api_key(self.model.provider).ok_or_else(|| {
@@ -194,20 +204,8 @@ impl<'a> AgentLoop<'a> {
         macro_rules! run_with_provider {
             ($provider_mod:path, $key:expr) => {{
                 use $provider_mod as provider;
-                // Suppress the default panic hook output so we can
-                // report the error cleanly.
-                let prev_hook = std::panic::take_hook();
-                std::panic::set_hook(Box::new(|_| {}));
-                let result = std::panic::catch_unwind(|| provider::Client::from_val($key));
-                std::panic::set_hook(prev_hook);
-                let client = result.map_err(|e| {
-                    let msg = e
-                        .downcast_ref::<String>()
-                        .map(|s| s.as_str())
-                        .or_else(|| e.downcast_ref::<&str>().copied())
-                        .unwrap_or("unknown error");
-                    Error::Llm(format!("failed to create {} client: {msg}", self.model.provider))
-                })?;
+                let client = provider::Client::from_val($key)
+                    .map_err(|e| Error::Llm(format!("failed to create {} client: {e:?}", self.model.provider)))?;
                 self.run_with_client(&client, prior_migrations, next_sequence, schema_diff)
                     .await
             }};
@@ -228,7 +226,8 @@ impl<'a> AgentLoop<'a> {
             "openrouter" => run_with_provider!(rig::providers::openrouter, api_key.unwrap().into()),
             "together" => run_with_provider!(rig::providers::together, api_key.unwrap().into()),
             "xai" => run_with_provider!(rig::providers::xai, api_key.unwrap().into()),
-            "ollama" => run_with_provider!(rig::providers::ollama, rig::client::Nothing),
+            "ollama" => run_with_provider!(rig::providers::ollama, rig::client::Nothing.into()),
+            "bedrock" => run_with_provider!(rig_bedrock::client, rig::client::Nothing.into()),
             "perplexity" => run_with_provider!(rig::providers::perplexity, api_key.unwrap().into()),
             other => Err(Error::Llm(format!("unsupported provider: {other}"))),
         }
@@ -244,7 +243,7 @@ impl<'a> AgentLoop<'a> {
     ) -> Result<MigrationResult, Error>
     where
         C: CompletionClient,
-        C::CompletionModel: rig::completion::CompletionModel,
+        C::CompletionModel: rig::completion::CompletionModel + 'static,
     {
         let previous_ddl = Arc::new(self.build_previous_ddl(prior_migrations)?);
         let desired_ddl = Arc::new(self.build_desired_ddl()?);
@@ -916,7 +915,7 @@ fn take_slot(slot: &tools::MigrationSlot) -> Result<MigrationOutput, Error> {
 /// Uses `.with_history()` so the LLM sees prior tool calls, schemas,
 /// and submitted migrations when retrying. Also handles providers that
 /// return empty responses after tool calls (e.g. Gemini).
-async fn prompt_agent<M: CompletionModel>(
+async fn prompt_agent<M: CompletionModel + 'static>(
     agent: &Agent<M, Output>,
     prompt: &str,
     history: &mut Vec<Message>,
@@ -927,10 +926,23 @@ async fn prompt_agent<M: CompletionModel>(
         Output::history_size(history);
     }
     let spinner = Spinner::start();
-    let result: Result<String, _> = agent.prompt(prompt).with_history(history).await;
+    // Pass the accumulated history as an explicit snapshot. `extended_details`
+    // makes the response carry the new turn's messages (prompt, assistant
+    // replies, and tool call/result pairs) so we can append them back to
+    // `history` ourselves — rig no longer mutates the passed history in place.
+    let result = agent
+        .prompt(prompt)
+        .with_history(history.clone())
+        .extended_details()
+        .await;
     spinner.stop();
     match result {
-        Ok(_) => {
+        Ok(response) => {
+            // Accumulate this turn so subsequent retries see prior attempts,
+            // the schemas the LLM read, and the error feedback.
+            if let Some(messages) = response.messages {
+                history.extend(messages);
+            }
             // If the LLM responded with text but never called submit_migration,
             // check if this is possibly a truncation issue (handled by take_slot later).
             Ok(())

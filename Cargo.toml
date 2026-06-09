@@ -10,7 +10,8 @@ dirs = "6"
 futures = "0.3"
 libc = "0.2"
 open = "5"
-rig-core = "0.33.0"
+rig = { package = "rig-core", version = "0.38.1" }
+rig-bedrock = "0.38.1"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1.0.228", features = ["derive"] }
