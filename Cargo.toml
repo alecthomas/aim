@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# Not used directly. rig-bedrock builds aws-config with default features off,
+# which omits the `credential_process` and SSO credential providers. AWS
+# profiles that resolve credentials via an external process or AWS IAM Identity
+# Center (SSO) need these, so we re-enable the features here; Cargo unifies them
+# onto the aws-config that rig-bedrock uses.
+aws-config = { version = "1.8", default-features = false, features = ["credentials-process", "sso"] }
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = "3.5.2"
 dirs = "6"
