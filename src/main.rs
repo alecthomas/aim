@@ -54,6 +54,22 @@ struct Cli {
     /// Generate migrations without a down (rollback) section.
     #[arg(long, global = true)]
     no_down: bool,
+
+    /// Set an environment variable before running (repeatable), e.g.
+    /// --env AWS_PROFILE=my-profile. Overrides existing variables and config.
+    #[arg(long = "env", global = true, value_name = "KEY=VALUE", value_parser = parse_env_pair)]
+    env: Vec<(String, String)>,
+}
+
+/// Parse a `KEY=VALUE` argument into a pair, rejecting an empty key.
+fn parse_env_pair(raw: &str) -> Result<(String, String), String> {
+    let (key, value) = raw
+        .split_once('=')
+        .ok_or_else(|| format!("expected KEY=VALUE, got '{raw}'"))?;
+    if key.is_empty() {
+        return Err(format!("environment variable name is empty in '{raw}'"));
+    }
+    Ok((key.to_owned(), value.to_owned()))
 }
 
 #[derive(Subcommand)]
@@ -99,35 +115,71 @@ impl Cli {
     }
 }
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
+fn main() -> std::process::ExitCode {
     yansi::whenever(yansi::Condition::TTY_AND_COLOR);
     let cli = Cli::parse();
-    let result = run(cli).await;
-    if let Err(err) = result {
+
+    // Parse aim.toml once and apply env vars before the async runtime starts.
+    // `std::env::set_var` is only sound single-threaded, and the AWS SDK (and
+    // others) read the environment once the runtime is up.
+    let raw_config = match prepare(&cli) {
+        Ok(raw_config) => raw_config,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("error: failed to start async runtime: {err}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    if let Err(err) = runtime.block_on(run(cli, raw_config)) {
         eprintln!("error: {err}");
         return std::process::ExitCode::FAILURE;
     }
     std::process::ExitCode::SUCCESS
 }
 
-async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+/// Parse `aim.toml` and apply the `[env]` config section plus `--env` flags to
+/// the process environment.
+///
+/// Returns the parsed config so commands can resolve it without re-parsing.
+/// Precedence (highest to lowest): `--env` flags, existing environment
+/// variables, `[env]` in aim.toml. Runs before the async runtime spawns
+/// threads, since `std::env::set_var` is only sound while single-threaded.
+fn prepare(cli: &Cli) -> Result<config::RawConfig, Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let raw_config = config::RawConfig::read(&cwd)?;
+    let assignments = config::env_assignments(raw_config.env(), &cli.env, |key| std::env::var_os(key).is_some());
+    for (key, value) in assignments {
+        // SAFETY: this runs in a single-threaded context before the Tokio
+        // runtime is created, so no other thread can race on the environment.
+        unsafe { std::env::set_var(key, value) };
+    }
+    Ok(raw_config)
+}
+
+async fn run(cli: Cli, raw_config: config::RawConfig) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Init => cmd_init(&cli)?,
-        Command::Diff { exit_code } => cmd_diff(&cli, exit_code)?,
-        Command::Generate { dry_run } => cmd_generate(&cli, dry_run).await?,
-        Command::Validate => cmd_validate(&cli)?,
-        Command::Rules => cmd_list_rules(&cli)?,
-        Command::Auth { ref provider } => cmd_auth(&cli, provider.clone())?,
+        Command::Diff { exit_code } => cmd_diff(&cli, raw_config, exit_code)?,
+        Command::Generate { dry_run } => cmd_generate(&cli, raw_config, dry_run).await?,
+        Command::Validate => cmd_validate(&cli, raw_config)?,
+        Command::Rules => cmd_list_rules(&cli, raw_config)?,
+        Command::Auth { ref provider } => cmd_auth(&cli, raw_config, provider.clone())?,
     }
     Ok(())
 }
 
-fn cmd_list_rules(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_list_rules(cli: &Cli, raw_config: config::RawConfig) -> Result<(), Box<dyn std::error::Error>> {
     use yansi::Paint;
 
-    let cwd = std::env::current_dir()?;
-    let config = Config::load(&cwd, cli.overrides())?;
+    let config = raw_config.resolve(cli.overrides())?;
 
     if config.validation_rules.is_empty() {
         Output::success("no validation rules enabled");
@@ -146,17 +198,18 @@ fn cmd_list_rules(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_auth(cli: &Cli, provider: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_auth(
+    cli: &Cli,
+    raw_config: config::RawConfig,
+    provider: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let provider = match provider {
         Some(p) => p,
-        None => {
-            let cwd = std::env::current_dir()?;
-            let config = Config::load(&cwd, cli.overrides());
-            config
-                .ok()
-                .and_then(|c| c.model.map(|m| m.provider.to_owned()))
-                .ok_or("provider is required (pass it as an argument or set model in aim.toml)")?
-        }
+        None => raw_config
+            .resolve(cli.overrides())
+            .ok()
+            .and_then(|c| c.model.map(|m| m.provider.to_owned()))
+            .ok_or("provider is required (pass it as an argument or set model in aim.toml)")?,
     };
     auth::login_interactive(&provider)?;
     Ok(())
@@ -207,9 +260,9 @@ fn create_engine(config: &Config) -> Result<Box<dyn DatabaseEngine>, Box<dyn std
     }
 }
 
-fn cmd_diff(cli: &Cli, exit_code: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = std::env::current_dir()?;
-    let config = Config::load(&cwd, cli.overrides())?;
+fn cmd_diff(cli: &Cli, raw_config: config::RawConfig, exit_code: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = raw_config.root().to_path_buf();
+    let config = raw_config.resolve(cli.overrides())?;
     let engine = create_engine(&config)?;
     let format = config.format.create();
 
@@ -269,9 +322,12 @@ fn cmd_diff(cli: &Cli, exit_code: bool) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-async fn cmd_generate(cli: &Cli, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let cwd = std::env::current_dir()?;
-    let config = Config::load(&cwd, cli.overrides())?;
+async fn cmd_generate(
+    cli: &Cli,
+    raw_config: config::RawConfig,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = raw_config.resolve(cli.overrides())?;
     let engine = create_engine(&config)?;
     let format = config.format.create();
 
@@ -383,11 +439,10 @@ async fn cmd_generate(cli: &Cli, dry_run: bool) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-fn cmd_validate(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_validate(cli: &Cli, raw_config: config::RawConfig) -> Result<(), Box<dyn std::error::Error>> {
     use yansi::Paint;
 
-    let cwd = std::env::current_dir()?;
-    let config = Config::load(&cwd, cli.overrides())?;
+    let config = raw_config.resolve(cli.overrides())?;
     let engine = create_engine(&config)?;
     let format = config.format.create();
     let dialect = engine.dialect();

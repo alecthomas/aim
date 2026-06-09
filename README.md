@@ -105,9 +105,27 @@ no_down = false
 
 All fields except `engine` and `model` have defaults. The `context` field is optional and appends extra instructions to the LLM prompt.
 
+### Environment variables
+
+An optional `[env]` section pre-sets environment variables before AIM runs — handy for provider credentials such as AWS Bedrock:
+
+```toml
+[env]
+AWS_PROFILE = "my-bedrock-profile"
+AWS_REGION = "us-east-1"
+```
+
+You can also set variables per-invocation with the repeatable `--env` flag:
+
+```sh
+aim generate --env AWS_PROFILE=my-bedrock-profile --env AWS_REGION=us-east-1
+```
+
+Precedence, highest to lowest: `--env` flags, variables already set in your environment, then `[env]` in `aim.toml`. (So a value exported in your shell overrides `aim.toml`, and `--env` overrides everything.)
+
 Set `no_down = true` to generate migrations without a DOWN (rollback) section. Rollbacks are easy to get wrong in ways that silently destroy data (for example, an UP that adds an enum value paired with a DOWN that drops it). With `no_down`, only the UP migration is generated, verified, and written, and `validate` checks only that each UP applies cleanly through the full history.
 
-Global flags (`--engine`, `--model`, `--format`, `--schema`, `--migrations`, `--max-retries`, `--no-down`) override config file values.
+Global flags (`--engine`, `--model`, `--format`, `--schema`, `--migrations`, `--max-retries`, `--no-down`, `--env`) override config file values.
 
 ## Schema validation
 

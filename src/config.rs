@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -241,7 +242,7 @@ impl fmt::Display for ModelSpec {
 }
 
 /// On-disk representation of `aim.toml`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
     engine: Option<EngineKind>,
@@ -256,6 +257,9 @@ struct FileConfig {
     context: Option<String>,
     /// Disable generation of down (rollback) migrations.
     no_down: Option<bool>,
+    /// Environment variables to pre-set before running (e.g. AWS credentials).
+    #[serde(default)]
+    env: BTreeMap<String, String>,
     /// Schema-change validation rules.
     #[serde(default)]
     validation: FileValidationConfig,
@@ -292,27 +296,84 @@ pub struct CliOverrides {
     pub no_down: Option<bool>,
 }
 
-impl Config {
-    /// Load config from `aim.toml` in `project_root`, then apply CLI overrides.
-    pub fn load(project_root: &Path, overrides: CliOverrides) -> Result<Self, Error> {
+/// `aim.toml` parsed once but not yet resolved against CLI overrides.
+///
+/// Parsing happens in a single place so the same parse drives both early
+/// environment setup (which must run before the async runtime starts) and the
+/// resolved [`Config`].
+#[derive(Debug)]
+pub struct RawConfig {
+    root: PathBuf,
+    file: FileConfig,
+}
+
+impl RawConfig {
+    /// Read and parse `aim.toml` from `project_root`, using defaults when the
+    /// file is absent.
+    pub fn read(project_root: &Path) -> Result<Self, Error> {
         let config_path = project_root.join("aim.toml");
-        let file_cfg: FileConfig = if config_path.exists() {
+        let file = if config_path.exists() {
             let contents = std::fs::read_to_string(&config_path).map_err(Error::Read)?;
             toml::from_str(&contents).map_err(Error::Parse)?
         } else {
-            FileConfig {
-                engine: None,
-                format: None,
-                schema: None,
-                migrations: None,
-                max_retries: None,
-                max_tokens: None,
-                model: None,
-                context: None,
-                no_down: None,
-                validation: FileValidationConfig::default(),
-            }
+            FileConfig::default()
         };
+        Ok(Self {
+            root: project_root.to_path_buf(),
+            file,
+        })
+    }
+
+    /// The project root this config was read from.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Environment variables declared in the `[env]` section.
+    pub fn env(&self) -> &BTreeMap<String, String> {
+        &self.file.env
+    }
+}
+
+/// Compute the environment-variable assignments to apply, honoring the
+/// precedence (highest to lowest): `--env` flags, existing environment
+/// variables, `[env]` config.
+///
+/// `is_set` reports whether a variable is already present in the process
+/// environment. Config entries are skipped when already set (so a real
+/// environment variable wins over config); flag entries are always appended
+/// afterward (so they override both when the result is applied in order).
+pub fn env_assignments(
+    file_env: &BTreeMap<String, String>,
+    flags: &[(String, String)],
+    is_set: impl Fn(&str) -> bool,
+) -> Vec<(String, String)> {
+    let mut assignments: Vec<(String, String)> = file_env
+        .iter()
+        .filter(|(key, _)| !is_set(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    assignments.extend(flags.iter().cloned());
+    assignments
+}
+
+impl Config {
+    /// Load config from `aim.toml` in `project_root`, then apply CLI overrides.
+    ///
+    /// Convenience wrapper that parses and resolves in one step. When the parsed
+    /// file is also needed for something else (e.g. the `[env]` section), parse
+    /// once with [`RawConfig::read`] and call [`RawConfig::resolve`].
+    pub fn load(project_root: &Path, overrides: CliOverrides) -> Result<Self, Error> {
+        RawConfig::read(project_root)?.resolve(overrides)
+    }
+}
+
+impl RawConfig {
+    /// Resolve into a runtime [`Config`] by layering CLI overrides on the parsed
+    /// file values.
+    pub fn resolve(self, overrides: CliOverrides) -> Result<Config, Error> {
+        let project_root = &self.root;
+        let file_cfg = self.file;
 
         let engine = overrides
             .engine
@@ -358,7 +419,9 @@ impl Config {
             validation_rules,
         })
     }
+}
 
+impl Config {
     /// Generate a default `aim.toml` string.
     pub fn default_toml(
         engine: &EngineKind,
@@ -382,6 +445,14 @@ max_tokens = {max_tokens}
         }
         toml.push_str(
             r#"
+# Environment variables to pre-set before running. Useful for provider
+# credentials, e.g. AWS Bedrock. Existing environment variables take
+# precedence over these; --env flags take precedence over both.
+#
+# [env]
+# AWS_PROFILE = "my-bedrock-profile"
+# AWS_REGION = "us-east-1"
+
 # Schema-change validation. The LLM checks each generated up migration
 # against these rules; error-level matches fail the migration, warning-level
 # matches are reported but non-blocking.
@@ -567,5 +638,65 @@ mod tests {
             model: "claude-haiku-4-5-20251001".to_owned(),
         };
         assert_eq!(spec.to_string(), "anthropic-claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn test_raw_config_env_reads_section() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("aim.toml"),
+            "engine = \"sqlite\"\n\n[env]\nAWS_PROFILE = \"p\"\nAWS_REGION = \"us-east-1\"\n",
+        )
+        .expect("write config");
+        let raw = RawConfig::read(dir.path()).expect("read");
+        assert_eq!(raw.env().get("AWS_PROFILE").map(String::as_str), Some("p"));
+        assert_eq!(raw.env().get("AWS_REGION").map(String::as_str), Some("us-east-1"));
+    }
+
+    #[test]
+    fn test_raw_config_env_missing_file_is_empty() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(RawConfig::read(dir.path()).expect("read").env().is_empty());
+    }
+
+    #[test]
+    fn test_raw_config_env_absent_section_is_empty() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("aim.toml"), "engine = \"sqlite\"\n").expect("write config");
+        assert!(RawConfig::read(dir.path()).expect("read").env().is_empty());
+    }
+
+    #[test]
+    fn test_raw_config_resolve_matches_load() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("aim.toml"), "engine = \"sqlite\"\nno_down = true\n").expect("write config");
+        let resolved = RawConfig::read(dir.path())
+            .expect("read")
+            .resolve(CliOverrides::default())
+            .expect("resolve");
+        assert!(resolved.no_down);
+    }
+
+    #[test]
+    fn test_env_assignments_precedence() {
+        let mut file = BTreeMap::new();
+        file.insert("FROM_CONFIG".to_owned(), "config".to_owned());
+        file.insert("ALSO_IN_ENV".to_owned(), "config".to_owned());
+        file.insert("OVERRIDDEN_BY_FLAG".to_owned(), "config".to_owned());
+        let flags = vec![("OVERRIDDEN_BY_FLAG".to_owned(), "flag".to_owned())];
+
+        // ALSO_IN_ENV is already present in the environment.
+        let assignments = env_assignments(&file, &flags, |key| key == "ALSO_IN_ENV");
+
+        // Config value applied because it is unset.
+        assert!(assignments.contains(&("FROM_CONFIG".to_owned(), "config".to_owned())));
+        // Skipped: a real environment variable wins over config.
+        assert!(!assignments.iter().any(|(k, _)| k == "ALSO_IN_ENV"));
+        // The flag entry is appended last, so applying assignments in order
+        // leaves the flag value as the final one for that key.
+        assert_eq!(
+            assignments.last(),
+            Some(&("OVERRIDDEN_BY_FLAG".to_owned(), "flag".to_owned()))
+        );
     }
 }
