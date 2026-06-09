@@ -202,9 +202,16 @@ impl<'a> AgentLoop<'a> {
         // The `.into()` call converts String to the provider-specific key
         // type (e.g. BearerAuth, GeminiApiKey) — all implement From<String>.
         macro_rules! run_with_provider {
+            // Build from a provider key via the standard `from_val` constructor.
             ($provider_mod:path, $key:expr) => {{
                 use $provider_mod as provider;
-                let client = provider::Client::from_val($key)
+                run_with_provider!(@build provider::Client::from_val($key))
+            }};
+            // Build from an explicit constructor expression. Bedrock rejects
+            // `from_val` and must be created via `from_env`, which lazily
+            // resolves the AWS credential chain on first use.
+            (@build $ctor:expr) => {{
+                let client = $ctor
                     .map_err(|e| Error::Llm(format!("failed to create {} client: {e:?}", self.model.provider)))?;
                 self.run_with_client(&client, prior_migrations, next_sequence, schema_diff)
                     .await
@@ -227,7 +234,7 @@ impl<'a> AgentLoop<'a> {
             "together" => run_with_provider!(rig::providers::together, api_key.unwrap().into()),
             "xai" => run_with_provider!(rig::providers::xai, api_key.unwrap().into()),
             "ollama" => run_with_provider!(rig::providers::ollama, rig::client::Nothing.into()),
-            "bedrock" => run_with_provider!(rig_bedrock::client, rig::client::Nothing.into()),
+            "bedrock" => run_with_provider!(@build rig_bedrock::client::Client::from_env()),
             "perplexity" => run_with_provider!(rig::providers::perplexity, api_key.unwrap().into()),
             other => Err(Error::Llm(format!("unsupported provider: {other}"))),
         }
