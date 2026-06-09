@@ -116,9 +116,9 @@ pub struct MigrationOutput {
     /// Short description for the migration filename (snake_case, no spaces).
     pub description: String,
     /// Seed data for verifying data preservation during migration.
-    /// Keys are table names. Provide at least 2 rows per table that exists
-    /// in the previous schema. Insert order must respect foreign key
-    /// dependencies (parent tables first).
+    /// Keys are table names. Provide at least 2 rows per table the migration
+    /// affects (plus their foreign-key parents). Insert order must respect
+    /// foreign key dependencies (parent tables first).
     #[serde(default)]
     pub seed_data: HashMap<String, TableSeedData>,
 }
@@ -132,7 +132,8 @@ pub type MigrationSlot = Arc<Mutex<Option<MigrationOutput>>>;
 /// The result is stashed in a shared slot that the orchestrator reads.
 pub struct SubmitMigration {
     pub slot: MigrationSlot,
-    /// Names of tables in the previous schema that require seed data.
+    /// Names of tables that require seed data: the previous-schema tables the
+    /// migration affects, plus their foreign-key parents.
     pub required_tables: Vec<String>,
     /// When `true`, no down migration is expected; any submitted `down_sql`
     /// is discarded.
@@ -177,8 +178,8 @@ impl Tool for SubmitMigration {
             .collect();
         if !missing.is_empty() {
             return Err(ToolError(format!(
-                "seed_data is missing entries for these previous-schema tables: {}. \
-                 seed_data MUST contain an entry for ALL {} previous-schema tables: {}. \
+                "seed_data is missing entries for these required tables: {}. \
+                 seed_data MUST contain an entry for ALL {} required tables: {}. \
                  Add the missing entries and call submit_migration again.",
                 missing.join(", "),
                 self.required_tables.len(),

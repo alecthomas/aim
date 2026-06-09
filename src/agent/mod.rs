@@ -267,7 +267,10 @@ impl<'a> AgentLoop<'a> {
         let slot: tools::MigrationSlot = Arc::new(Mutex::new(None));
 
         let dialect = self.engine.dialect();
-        let previous_tables = schema::table_names(dialect.as_ref(), &previous_ddl);
+        // Seed data is only needed for tables the migration actually changes
+        // (plus their FK parents). Seeding untouched tables cannot reveal data
+        // loss and balloons the LLM's output, so we scope the requirement.
+        let required_tables = schema::required_seed_tables(dialect.as_ref(), &previous_ddl, &desired_ddl);
         // Array-typed columns per schema, so seed values for them render as
         // PostgreSQL array literals instead of JSON.
         let previous_array_columns = schema::array_columns(dialect.as_ref(), &previous_ddl);
@@ -289,7 +292,7 @@ impl<'a> AgentLoop<'a> {
             })
             .tool(tools::SubmitMigration {
                 slot: slot.clone(),
-                required_tables: previous_tables.clone(),
+                required_tables: required_tables.clone(),
                 no_down: self.no_down,
             })
             .build();
@@ -297,23 +300,39 @@ impl<'a> AgentLoop<'a> {
         // Spell out exactly which tables need seed_data so the LLM does not
         // have to infer the full set from the schema dump (a common cause of
         // rejected submissions).
-        let seed_requirement = if previous_tables.is_empty() {
-            "The previous schema has no tables, so seed_data must be empty.".to_string()
+        let seed_requirement = if required_tables.is_empty() {
+            "This migration changes no existing table's data, so seed_data must be empty.".to_string()
         } else {
             format!(
-                "seed_data MUST contain an entry for EVERY one of these {} previous-schema \
-                 tables, or the submission will be rejected: {}.",
-                previous_tables.len(),
-                previous_tables.join(", ")
+                "seed_data MUST contain an entry for EVERY one of these {} tables (the tables this \
+                 migration affects, plus their foreign-key parents), or the submission will be \
+                 rejected: {}. Do NOT add entries for any other table.",
+                required_tables.len(),
+                required_tables.join(", ")
+            )
+        };
+
+        // Inline the full previous-schema definitions of the tables needing
+        // seed data, so the model has every column for valid seed rows without
+        // a round-trip to read the entire schema.
+        let seed_definitions = if required_tables.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\nFull definitions of the tables that need seed data, from the PREVIOUS schema \
+                 (use these to write valid seed rows — you should not need to read the full \
+                 schema):\n```\n{}\n```",
+                schema::definitions_for(dialect.as_ref(), &previous_ddl, &required_tables)
             )
         };
 
         let initial_prompt = format!(
-            "Generate the migration. Use the tools to read the schemas, then call \
-             submit_migration with your result.\n\n\
+            "Generate the migration from the diff below, then call submit_migration with your \
+             result. Read the full schemas only if the diff leaves you unsure.\n\n\
              {seed_requirement}\n\n\
-             Here is a summary of what changed between the previous and desired schemas:\n\
-             ```\n{schema_diff}\n```"
+             Here is the diff of what changed between the previous and desired schemas \
+             (each hunk is prefixed with `@@ <statement> @@` naming the object it belongs to):\n\
+             ```\n{schema_diff}\n```{seed_definitions}"
         );
 
         // Chat history persists across retries so the LLM can see its
@@ -329,7 +348,7 @@ impl<'a> AgentLoop<'a> {
             println!();
             Output::phase("Verifying migration...");
 
-            let seed_issues = validate_seed_coverage(dialect.as_ref(), &previous_ddl, &candidate, self.no_down);
+            let seed_issues = validate_seed_coverage(&required_tables, &candidate, self.no_down);
             if !seed_issues.is_empty() {
                 let msg = format!(
                     "Seed data validation failed:\n{}",
@@ -755,25 +774,20 @@ impl<'a> AgentLoop<'a> {
     }
 }
 
-/// Validate that seed data covers every table in the previous schema.
+/// Validate that seed data covers every required table.
 ///
-/// Returns a list of issues, or an empty vec if all tables are covered
-/// with valid seed data. Checks that:
-/// - every table in the previous DDL has a `seed_data` entry
+/// `required_tables` are the previous-schema tables the migration affects (plus
+/// their FK parents). Returns a list of issues, or an empty vec if all required
+/// tables are covered with valid seed data. Checks that:
+/// - every required table has a `seed_data` entry
 /// - each entry has at least 2 rows
 /// - `expected_after_up` has a matching row count
 /// - `expected_after_down` has a matching row count (skipped when `no_down`,
 ///   since no down migration is generated or verified)
-fn validate_seed_coverage(
-    dialect: &dyn sqlparser::dialect::Dialect,
-    previous_ddl: &str,
-    candidate: &MigrationOutput,
-    no_down: bool,
-) -> Vec<String> {
-    let tables = schema::table_names(dialect, previous_ddl);
+fn validate_seed_coverage(required_tables: &[String], candidate: &MigrationOutput, no_down: bool) -> Vec<String> {
     let mut issues = Vec::new();
 
-    for table in &tables {
+    for table in required_tables {
         match candidate.seed_data.get(table) {
             None => issues.push(format!("missing seed data for table `{table}`")),
             Some(seed) => {
@@ -1009,10 +1023,12 @@ mod tests {
         }
     }
 
+    fn required(tables: &[&str]) -> Vec<String> {
+        tables.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn test_validate_seed_coverage_all_tables_covered() {
-        let ddl = "CREATE TABLE users (id INTEGER, name TEXT);\n\nCREATE TABLE groups (id INTEGER)";
-        let dialect = sqlparser::dialect::SQLiteDialect {};
         let candidate = make_candidate(HashMap::from([
             ("users".into(), make_seed(two_rows())),
             (
@@ -1023,35 +1039,41 @@ mod tests {
                 ]),
             ),
         ]));
-        let issues = validate_seed_coverage(&dialect, ddl, &candidate, false);
+        let issues = validate_seed_coverage(&required(&["users", "groups"]), &candidate, false);
         assert!(issues.is_empty(), "expected no issues, got: {issues:?}");
     }
 
     #[test]
     fn test_validate_seed_coverage_missing_table() {
-        let ddl = "CREATE TABLE users (id INTEGER);\n\nCREATE TABLE groups (id INTEGER)";
-        let dialect = sqlparser::dialect::SQLiteDialect {};
         let candidate = make_candidate(HashMap::from([("users".into(), make_seed(two_rows()))]));
-        let issues = validate_seed_coverage(&dialect, ddl, &candidate, false);
+        let issues = validate_seed_coverage(&required(&["users", "groups"]), &candidate, false);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].contains("groups"), "should mention groups: {}", issues[0]);
     }
 
     #[test]
+    fn test_validate_seed_coverage_ignores_unrequired_table() {
+        // Seed data for a table that isn't required is allowed but unnecessary;
+        // coverage only checks the required set.
+        let candidate = make_candidate(HashMap::from([
+            ("users".into(), make_seed(two_rows())),
+            ("groups".into(), make_seed(two_rows())),
+        ]));
+        let issues = validate_seed_coverage(&required(&["users"]), &candidate, false);
+        assert!(issues.is_empty(), "expected no issues, got: {issues:?}");
+    }
+
+    #[test]
     fn test_validate_seed_coverage_too_few_rows() {
-        let ddl = "CREATE TABLE users (id INTEGER)";
-        let dialect = sqlparser::dialect::SQLiteDialect {};
         let one_row = vec![HashMap::from([("id".into(), serde_json::json!(1))])];
         let candidate = make_candidate(HashMap::from([("users".into(), make_seed(one_row))]));
-        let issues = validate_seed_coverage(&dialect, ddl, &candidate, false);
+        let issues = validate_seed_coverage(&required(&["users"]), &candidate, false);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].contains("at least 2"), "{}", issues[0]);
     }
 
     #[test]
     fn test_validate_seed_coverage_row_count_mismatch() {
-        let ddl = "CREATE TABLE users (id INTEGER)";
-        let dialect = sqlparser::dialect::SQLiteDialect {};
         let candidate = make_candidate(HashMap::from([(
             "users".into(),
             TableSeedData {
@@ -1060,15 +1082,13 @@ mod tests {
                 expected_after_down: two_rows(),
             },
         )]));
-        let issues = validate_seed_coverage(&dialect, ddl, &candidate, false);
+        let issues = validate_seed_coverage(&required(&["users"]), &candidate, false);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].contains("expected_after_up"), "{}", issues[0]);
     }
 
     #[test]
     fn test_validate_seed_coverage_no_down_skips_expected_after_down() {
-        let ddl = "CREATE TABLE users (id INTEGER)";
-        let dialect = sqlparser::dialect::SQLiteDialect {};
         // expected_after_down is empty, as the model omits it when no_down is set.
         let candidate = make_candidate(HashMap::from([(
             "users".into(),
@@ -1079,21 +1099,20 @@ mod tests {
             },
         )]));
         assert!(
-            validate_seed_coverage(&dialect, ddl, &candidate, true).is_empty(),
+            validate_seed_coverage(&required(&["users"]), &candidate, true).is_empty(),
             "no_down must skip the expected_after_down check"
         );
         assert_eq!(
-            validate_seed_coverage(&dialect, ddl, &candidate, false).len(),
+            validate_seed_coverage(&required(&["users"]), &candidate, false).len(),
             1,
             "with down enabled the empty expected_after_down is an issue"
         );
     }
 
     #[test]
-    fn test_validate_seed_coverage_empty_ddl() {
-        let dialect = sqlparser::dialect::SQLiteDialect {};
+    fn test_validate_seed_coverage_empty_required() {
         let candidate = make_candidate(HashMap::new());
-        let issues = validate_seed_coverage(&dialect, "", &candidate, false);
+        let issues = validate_seed_coverage(&[], &candidate, false);
         assert!(issues.is_empty());
     }
 

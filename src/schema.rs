@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use sqlparser::ast::{DataType, ObjectNamePart, Statement};
+use sqlparser::ast::{ColumnOption, DataType, ObjectName, ObjectNamePart, Statement, TableConstraint};
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::Parser;
 
@@ -54,6 +54,26 @@ fn render_create_table(ct: &sqlparser::ast::CreateTable) -> String {
     format!("CREATE TABLE {} (\n{}\n)", ct.name, lines.join(",\n"))
 }
 
+/// Extract the unquoted final identifier of an object name, dropping any
+/// schema qualifier (e.g. `public.users` -> `users`).
+fn object_name_table(name: &ObjectName) -> Option<String> {
+    name.0
+        .iter()
+        .filter_map(|part| match part {
+            ObjectNamePart::Identifier(ident) => Some(ident.value.clone()),
+            ObjectNamePart::Function(_) => None,
+        })
+        .next_back()
+}
+
+/// Split a DDL dump into individual statement strings (separated by `;` and a
+/// blank line), trimmed and with empty fragments removed.
+fn split_statements(ddl: &str) -> impl Iterator<Item = &str> {
+    ddl.split(";\n\n")
+        .map(|s| s.trim().trim_end_matches(';').trim())
+        .filter(|s| !s.is_empty())
+}
+
 /// Strip quote styles from all identifiers in an ObjectName.
 fn strip_quotes_from_name(name: &mut sqlparser::ast::ObjectName) {
     for part in &mut name.0 {
@@ -69,29 +89,14 @@ fn strip_quotes_from_name(name: &mut sqlparser::ast::ObjectName) {
 /// the unquoted name of every `CREATE TABLE` found. Returns names in
 /// the order they appear.
 pub fn table_names(dialect: &dyn Dialect, ddl: &str) -> Vec<String> {
-    let statements: Vec<&str> = ddl
-        .split(";\n\n")
-        .map(|s| s.trim().trim_end_matches(';').trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-
     let mut names = Vec::new();
-    for sql in statements {
+    for sql in split_statements(ddl) {
         if let Ok(parsed) = Parser::parse_sql(dialect, sql) {
             for stmt in parsed {
-                if let Statement::CreateTable(ct) = stmt {
-                    let name = ct
-                        .name
-                        .0
-                        .iter()
-                        .filter_map(|part| match part {
-                            ObjectNamePart::Identifier(ident) => Some(ident.value.clone()),
-                            ObjectNamePart::Function(_) => None,
-                        })
-                        .next_back();
-                    if let Some(n) = name {
-                        names.push(n);
-                    }
+                if let Statement::CreateTable(ct) = stmt
+                    && let Some(n) = object_name_table(&ct.name)
+                {
+                    names.push(n);
                 }
             }
         }
@@ -105,14 +110,8 @@ pub fn table_names(dialect: &dyn Dialect, ddl: &str) -> Vec<String> {
 /// (present in the previous schema, absent in the desired schema), so the
 /// down-migration data check can skip values it cannot possibly restore.
 pub fn table_columns(dialect: &dyn Dialect, ddl: &str) -> HashMap<String, HashSet<String>> {
-    let statements: Vec<&str> = ddl
-        .split(";\n\n")
-        .map(|s| s.trim().trim_end_matches(';').trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-
     let mut result: HashMap<String, HashSet<String>> = HashMap::new();
-    for sql in statements {
+    for sql in split_statements(ddl) {
         let Ok(parsed) = Parser::parse_sql(dialect, sql) else {
             continue;
         };
@@ -120,16 +119,7 @@ pub fn table_columns(dialect: &dyn Dialect, ddl: &str) -> HashMap<String, HashSe
             let Statement::CreateTable(ct) = stmt else {
                 continue;
             };
-            let Some(table) = ct
-                .name
-                .0
-                .iter()
-                .filter_map(|part| match part {
-                    ObjectNamePart::Identifier(ident) => Some(ident.value.clone()),
-                    ObjectNamePart::Function(_) => None,
-                })
-                .next_back()
-            else {
+            let Some(table) = object_name_table(&ct.name) else {
                 continue;
             };
             let cols = ct.columns.iter().map(|col| col.name.value.clone()).collect();
@@ -160,6 +150,117 @@ pub fn dropped_columns(dialect: &dyn Dialect, previous: &str, desired: &str) -> 
         }
     }
     result
+}
+
+/// Map each table name to its normalized `CREATE TABLE` text.
+///
+/// Used to detect which tables a migration changes by comparing definitions
+/// between the previous and desired schemas.
+fn table_definitions(dialect: &dyn Dialect, ddl: &str) -> HashMap<String, String> {
+    let mut defs = HashMap::new();
+    for sql in split_statements(ddl) {
+        let Ok(parsed) = Parser::parse_sql(dialect, sql) else {
+            continue;
+        };
+        for stmt in &parsed {
+            if let Statement::CreateTable(ct) = stmt
+                && let Some(name) = object_name_table(&ct.name)
+            {
+                defs.insert(name, normalize_ddl(dialect, sql));
+            }
+        }
+    }
+    defs
+}
+
+/// Render the normalized `CREATE TABLE` definitions for the named tables, in
+/// the given order, joined by blank lines. Tables not found in `ddl` are
+/// skipped. Used to hand the model the full column lists of the tables it must
+/// seed, so it need not read the entire schema.
+pub fn definitions_for(dialect: &dyn Dialect, ddl: &str, tables: &[String]) -> String {
+    let defs = table_definitions(dialect, ddl);
+    tables
+        .iter()
+        .filter_map(|t| defs.get(t).map(String::as_str))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Tables present in `previous` that an UP migration changes: either modified
+/// (their normalized definition differs in `desired`) or dropped (absent from
+/// `desired`). Newly created tables are excluded — they hold no pre-existing
+/// data to preserve, so they need no seed data.
+pub fn changed_tables(dialect: &dyn Dialect, previous: &str, desired: &str) -> HashSet<String> {
+    let previous_defs = table_definitions(dialect, previous);
+    let desired_defs = table_definitions(dialect, desired);
+    previous_defs
+        .into_iter()
+        .filter(|(name, def)| desired_defs.get(name) != Some(def))
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// Map each table to the set of tables it directly references via FOREIGN KEY,
+/// covering both table-level constraints and inline column references.
+pub fn foreign_key_parents(dialect: &dyn Dialect, ddl: &str) -> HashMap<String, HashSet<String>> {
+    let mut parents: HashMap<String, HashSet<String>> = HashMap::new();
+    for sql in split_statements(ddl) {
+        let Ok(parsed) = Parser::parse_sql(dialect, sql) else {
+            continue;
+        };
+        for stmt in &parsed {
+            let Statement::CreateTable(ct) = stmt else {
+                continue;
+            };
+            let Some(child) = object_name_table(&ct.name) else {
+                continue;
+            };
+            let entry = parents.entry(child).or_default();
+            for constraint in &ct.constraints {
+                if let TableConstraint::ForeignKey(fk) = constraint
+                    && let Some(parent) = object_name_table(&fk.foreign_table)
+                {
+                    entry.insert(parent);
+                }
+            }
+            for column in &ct.columns {
+                for option in &column.options {
+                    if let ColumnOption::ForeignKey(fk) = &option.option
+                        && let Some(parent) = object_name_table(&fk.foreign_table)
+                    {
+                        entry.insert(parent);
+                    }
+                }
+            }
+        }
+    }
+    parents
+}
+
+/// The previous-schema tables that need seed data to verify a migration:
+/// the tables it changes plus the transitive closure of their FOREIGN KEY
+/// parents (so child rows remain insertable and data derived from parents can
+/// be verified). Returned in `previous`-schema declaration order.
+pub fn required_seed_tables(dialect: &dyn Dialect, previous: &str, desired: &str) -> Vec<String> {
+    let parents = foreign_key_parents(dialect, previous);
+    let mut required = changed_tables(dialect, previous, desired);
+    // Walk the FK graph from each changed table, pulling in parents so their
+    // rows exist for inserts and transform queries.
+    let mut stack: Vec<String> = required.iter().cloned().collect();
+    while let Some(table) = stack.pop() {
+        let Some(table_parents) = parents.get(&table) else {
+            continue;
+        };
+        for parent in table_parents {
+            if required.insert(parent.clone()) {
+                stack.push(parent.clone());
+            }
+        }
+    }
+    table_names(dialect, previous)
+        .into_iter()
+        .filter(|t| required.contains(t))
+        .collect()
 }
 
 /// Identify array-typed columns per table in a DDL dump.
@@ -492,5 +593,76 @@ mod tests {
         let ddl = "CREATE TABLE public.acl (id integer, args text[])";
         let cols = array_columns(&pg, ddl);
         assert!(cols.get("acl").is_some_and(|c| c.contains("args")), "{cols:?}");
+    }
+
+    #[test]
+    fn test_changed_tables_detects_modified_and_ignores_unchanged() {
+        let previous = "CREATE TABLE users (id INTEGER, name TEXT);\n\nCREATE TABLE groups (id INTEGER)";
+        let desired = "CREATE TABLE users (id INTEGER, name TEXT, email TEXT);\n\nCREATE TABLE groups (id INTEGER)";
+        let changed = changed_tables(&sqlite(), previous, desired);
+        assert!(changed.contains("users"), "users changed: {changed:?}");
+        assert!(!changed.contains("groups"), "groups unchanged: {changed:?}");
+    }
+
+    #[test]
+    fn test_changed_tables_includes_dropped_excludes_created() {
+        let previous = "CREATE TABLE users (id INTEGER);\n\nCREATE TABLE legacy (id INTEGER)";
+        let desired = "CREATE TABLE users (id INTEGER);\n\nCREATE TABLE fresh (id INTEGER)";
+        let changed = changed_tables(&sqlite(), previous, desired);
+        assert!(changed.contains("legacy"), "dropped table included: {changed:?}");
+        assert!(!changed.contains("fresh"), "created table excluded: {changed:?}");
+        assert!(!changed.contains("users"), "unchanged table excluded: {changed:?}");
+    }
+
+    #[test]
+    fn test_foreign_key_parents_table_level() {
+        let ddl = "CREATE TABLE users (id INTEGER PRIMARY KEY);\n\n\
+                   CREATE TABLE orders (id INTEGER, user_id INTEGER, FOREIGN KEY (user_id) REFERENCES users (id))";
+        let parents = foreign_key_parents(&sqlite(), ddl);
+        assert!(
+            parents.get("orders").is_some_and(|p| p.contains("users")),
+            "orders -> users: {parents:?}"
+        );
+    }
+
+    #[test]
+    fn test_required_seed_tables_pulls_in_fk_parents() {
+        // Only `orders` changes, but its FK parent `users` must be seeded too,
+        // and the parent is returned first (declaration order).
+        let previous = "CREATE TABLE users (id INTEGER PRIMARY KEY);\n\n\
+                        CREATE TABLE orders (id INTEGER, user_id INTEGER, FOREIGN KEY (user_id) REFERENCES users (id))";
+        let desired = "CREATE TABLE users (id INTEGER PRIMARY KEY);\n\n\
+                       CREATE TABLE orders (id INTEGER, user_id INTEGER, note TEXT, FOREIGN KEY (user_id) REFERENCES users (id))";
+        let required = required_seed_tables(&sqlite(), previous, desired);
+        assert_eq!(
+            required,
+            vec!["users".to_string(), "orders".to_string()],
+            "{required:?}"
+        );
+    }
+
+    #[test]
+    fn test_definitions_for_returns_requested_tables_in_order() {
+        let ddl = "CREATE TABLE users (id INTEGER, name TEXT);\n\nCREATE TABLE orders (id INTEGER)";
+        let out = definitions_for(&sqlite(), ddl, &["orders".to_string(), "users".to_string()]);
+        let orders_pos = out.find("CREATE TABLE orders").expect("orders present");
+        let users_pos = out.find("CREATE TABLE users").expect("users present");
+        assert!(orders_pos < users_pos, "requested order preserved: {out}");
+    }
+
+    #[test]
+    fn test_definitions_for_skips_unknown_tables() {
+        let ddl = "CREATE TABLE users (id INTEGER)";
+        let out = definitions_for(&sqlite(), ddl, &["users".to_string(), "missing".to_string()]);
+        assert!(out.contains("CREATE TABLE users"), "{out}");
+        assert!(!out.contains("missing"), "{out}");
+    }
+
+    #[test]
+    fn test_required_seed_tables_empty_when_no_table_data_changes() {
+        // Adding a brand-new table touches no existing table's data.
+        let previous = "CREATE TABLE users (id INTEGER)";
+        let desired = "CREATE TABLE users (id INTEGER);\n\nCREATE TABLE audit (id INTEGER)";
+        assert!(required_seed_tables(&sqlite(), previous, desired).is_empty());
     }
 }

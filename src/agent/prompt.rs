@@ -40,7 +40,12 @@ pub fn system_prompt(dialect: &str, context: Option<&str>, no_down: bool) -> Str
     let mut prompt = format!(
         r#"You are a database migration generator. Explain what you're doing as you think.
 
-Call `read_previous_schema` and `read_schema`, then call `submit_migration` with {submit_fields}.
+You are given a diff summarizing what changed between the previous and desired \
+schemas. Use it to write the migration directly — you usually do NOT need to \
+read the full schemas. The `read_previous_schema` and `read_schema` tools are \
+available if you need more detail (for example, the full column list of a table \
+when writing its seed data, or to resolve an ambiguous change), but calling \
+them is optional. When ready, call `submit_migration` with {submit_fields}.
 
 SQL dialect: {dialect}
 
@@ -64,7 +69,7 @@ SQL dialect: {dialect}
 ## Seed Data Rules
 You MUST provide seed_data to verify that migrations preserve existing data.
 
-The seed_data field is a JSON object keyed by table name. For EVERY table that exists in the PREVIOUS schema, provide an entry with:
+The seed_data field is a JSON object keyed by table name. For each table listed in the seed-data requirement below (the tables this migration affects, plus their foreign-key parents) — and ONLY those tables — provide an entry with:
 - `rows`: at least 2 rows of realistic sample data to INSERT before applying UP.
 - `expected_after_up`: what those rows should look like after UP is applied. Reflect any column additions (with their DEFAULT values), column removals, renames, or type changes.{down_seed_field}
 

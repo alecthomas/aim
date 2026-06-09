@@ -258,9 +258,39 @@ fn truncate(s: &str, max: usize) -> String {
             prev_was_space = false;
         }
     }
-    if collapsed.len() <= max {
-        collapsed
-    } else {
-        format!("{}...", &collapsed[..max])
+    // Count by chars and slice on a char boundary so multibyte characters
+    // (e.g. an em-dash) never split mid-codepoint and panic.
+    match collapsed.char_indices().nth(max) {
+        Some((byte_idx, _)) => format!("{}...", &collapsed[..byte_idx]),
+        None => collapsed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn test_truncate_short_string_unchanged() {
+        assert_eq!(truncate("hello", 80), "hello");
+    }
+
+    #[test]
+    fn test_truncate_collapses_whitespace() {
+        assert_eq!(truncate("a\n  b\tc", 80), "a b c");
+    }
+
+    #[test]
+    fn test_truncate_appends_ellipsis() {
+        assert_eq!(truncate("abcdef", 3), "abc...");
+    }
+
+    #[test]
+    fn test_truncate_on_multibyte_boundary_does_not_panic() {
+        // The cut point lands exactly on a multibyte char (em-dash); slicing
+        // by bytes here would panic, so truncation must be char-aware.
+        let input = "ab\u{2014}cdef";
+        assert_eq!(truncate(input, 2), "ab...");
+        assert_eq!(truncate(input, 3), "ab\u{2014}...");
     }
 }
