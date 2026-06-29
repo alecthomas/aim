@@ -14,10 +14,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # ratchet:actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # ratchet:cashapp/activate-hermit@v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # ratchet:cashapp/activate-hermit@v1
       - run: just release-notes > release-notes.md
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -46,8 +46,8 @@ jobs:
             arch: aarch64
             target-suffix: apple-darwin
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # ratchet:cashapp/activate-hermit@v1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # ratchet:actions/checkout@v7
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # ratchet:cashapp/activate-hermit@v1
         with:
           cache: true
       - id: update-version
